@@ -12,6 +12,8 @@ from jevero.config import (
     MissingEnvironmentError,
     load_config,
     openrouter_api_key,
+    store_zotero_write_key,
+    zotero_write_key,
 )
 
 def write_config(tmp_path: Path, body: str) -> Path:
@@ -233,3 +235,42 @@ def test_openrouter_key_is_read_from_the_environment(monkeypatch: pytest.MonkeyP
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
 
     assert openrouter_api_key() == "sk-test"
+
+
+def test_store_write_key_creates_env_with_owner_only_mode(tmp_path: Path):
+    env = tmp_path / ".env"
+
+    path = store_zotero_write_key("local-key-value", env)
+
+    assert path == env
+    assert env.read_text(encoding="utf-8") == "ZOTERO_LOCAL_WRITE_KEY=local-key-value\n"
+    assert env.stat().st_mode & 0o777 == 0o600
+
+
+def test_store_write_key_replaces_only_its_own_line(tmp_path: Path):
+    env = tmp_path / ".env"
+    env.write_text(
+        "OPENROUTER_API_KEY=keep-me\nZOTERO_LOCAL_WRITE_KEY=old\n# comment\n",
+        encoding="utf-8",
+    )
+
+    store_zotero_write_key("new", env)
+
+    text = env.read_text(encoding="utf-8")
+    assert "OPENROUTER_API_KEY=keep-me" in text
+    assert "ZOTERO_LOCAL_WRITE_KEY=new" in text
+    assert "old" not in text
+    assert "# comment" in text
+
+
+def test_write_key_is_read_from_the_environment(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("ZOTERO_LOCAL_WRITE_KEY", raising=False)
+    assert zotero_write_key() is None
+
+    monkeypatch.setenv("ZOTERO_LOCAL_WRITE_KEY", "stored")
+    assert zotero_write_key() == "stored"
+
+
+def test_an_empty_write_key_counts_as_absent(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("ZOTERO_LOCAL_WRITE_KEY", "   ")
+    assert zotero_write_key() is None

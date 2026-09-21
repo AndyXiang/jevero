@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import re
 import secrets
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -212,16 +212,20 @@ class ZoteroClient:
         timeout_seconds: float = 30.0,
         authorize_timeout_seconds: float = 120.0,
         app_name: str = APP_NAME,
+        write_key: str | None = None,
+        on_write_key: Callable[[str], None] | None = None,
         http_client: httpx.Client | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.app_name = app_name
         self._authorize_timeout = authorize_timeout_seconds
+        # A key remembered from a previous run: reusing it means no dialog.
+        self._write_key = write_key
+        self._on_write_key = on_write_key
         self._http = http_client or create_client(timeout_seconds)
         self._owns_client = http_client is None
         self._server_id: str | None = None
         self._zotero_version: str | None = None
-        self._write_key: str | None = None
         self._collection_paths: dict[str, str] | None = None
 
     def __enter__(self) -> ZoteroClient:
@@ -419,6 +423,8 @@ class ZoteroClient:
             )
 
         self._write_key = key
+        if self._on_write_key is not None:
+            self._on_write_key(key)
         return key
 
     def apply_actions(self, item: ZoteroItem, actions: PolicyActions) -> list[str]:

@@ -20,6 +20,9 @@ from .models import COVERAGE_STATES
 DEFAULT_CONFIG_PATH = Path("config.yaml")
 DEFAULT_ENV_PATH = Path(".env")
 
+#: Holds the Zotero local write key, written by the tool after Zotero grants it.
+ZOTERO_WRITE_KEY_ENV = "ZOTERO_LOCAL_WRITE_KEY"
+
 #: Taxonomy names become tag suffixes, so keep them tag-safe.
 _NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 
@@ -331,5 +334,34 @@ def _require_env(name: str) -> str:
 def openrouter_api_key() -> str:
     """OpenRouter key used by the Jev client."""
     return _require_env("OPENROUTER_API_KEY")
+
+
+def zotero_write_key() -> str | None:
+    """The remembered Zotero local write key, if one was stored in ``.env``."""
+    return _optional_env(ZOTERO_WRITE_KEY_ENV)
+
+
+def store_zotero_write_key(
+    key: str, env_file: str | Path = DEFAULT_ENV_PATH
+) -> Path:
+    """Persist the local write key in ``.env``.
+
+    Zotero grants the key through a confirmation dialog once; keeping it means
+    later runs write without asking again. The file is already the place the
+    other secrets live and is gitignored, so it needs no new mechanism — but it
+    is a credential that can write the whole library, hence mode 0600.
+    """
+    path = Path(env_file)
+    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    assignment = f"{ZOTERO_WRITE_KEY_ENV}={key}"
+    for index, line in enumerate(lines):
+        if line.strip().startswith(f"{ZOTERO_WRITE_KEY_ENV}="):
+            lines[index] = assignment
+            break
+    else:
+        lines.append(assignment)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    path.chmod(0o600)
+    return path
 
 

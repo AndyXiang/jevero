@@ -163,7 +163,7 @@ collections:
   roles_parent: "03 Roles"
   review_collection: "04 Review"
   route_roles: true
-  remove_from_inbox: false
+  remove_from_inbox: true
 
 thresholds:
   # How confident a judgement must be before it becomes a tag.

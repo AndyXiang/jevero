@@ -696,12 +696,19 @@ On Zotero 10+ the flow is:
 2. **choose "Always Allow"**, which is required: a key granted with plain
    "Allow" is single-use, so it would mean one dialog per paper. jevero rejects
    a single-use key and tells you to re-run and pick "Always Allow";
-3. the key is kept **in memory only** — never written to `.env` or disk — and
-   reused for the rest of the run;
+3. the granted key is **stored in `.env`** as `ZOTERO_LOCAL_WRITE_KEY` (mode
+   0600; `.env` is gitignored and already holds the OpenRouter key). Later runs
+   read it and **never ask Zotero again** — no dialog, no request. A key that
+   Zotero rejects with a `401` is replaced automatically, once;
 4. every write echoes `Zotero-Server-ID` (otherwise `428 Precondition
    Required`) and carries `If-Unmodified-Since-Version`. A `412` means the item
    changed underneath and the run must be repeated; a `401` means the key was
    consumed or revoked, and jevero re-authorizes once and retries.
+
+To revoke: delete the `ZOTERO_LOCAL_WRITE_KEY` line, and/or use Zotero ->
+Settings -> Advanced -> "Clear Write Authorizations". Deleting only the line is
+enough to stop jevero using it; Zotero forgets the authorization when you clear
+it there.
 
 Local object versions have **no relation** to Web API versions, so the two
 backends must never share cached versions.

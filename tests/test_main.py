@@ -686,3 +686,22 @@ def test_route_all_scope_applies_when_confirmed(monkeypatch, config_path: Path):
 
     assert result.exit_code == 0, result.output
     assert zotero.membership == [({"KEY00001", "KEY00002"}, set())]
+
+
+def test_client_picks_up_a_stored_write_key(monkeypatch, config: Config):
+    monkeypatch.setenv("ZOTERO_LOCAL_WRITE_KEY", "stored-key")
+
+    client = main_module._zotero_client(config)
+
+    assert client._write_key == "stored-key"
+
+
+def test_a_granted_key_is_written_to_env(monkeypatch, tmp_path: Path):
+    """The callback that makes the next run silent."""
+    monkeypatch.chdir(tmp_path)
+
+    main_module._remember_write_key("fresh-key")
+
+    assert (tmp_path / ".env").read_text(encoding="utf-8").startswith(
+        "ZOTERO_LOCAL_WRITE_KEY=fresh-key"
+    )

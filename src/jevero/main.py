@@ -28,6 +28,8 @@ from .config import (
     load_config,
     load_environment,
     openrouter_api_key,
+    store_zotero_write_key,
+    zotero_write_key,
 )
 from .jev import JevClient, JevError, JevOutcome
 from .models import InputMode, PaperRecord, PolicyActions
@@ -251,6 +253,7 @@ def route(
 
     try:
         config = load_config(config_path)
+        load_environment()
         summary = _route(
             config,
             mutate=mutate,
@@ -298,6 +301,15 @@ def check(
 
     load_environment()
     _report_env("OPENROUTER_API_KEY", openrouter_api_key)
+    if zotero_write_key():
+        typer.secho(
+            "  ZOTERO_LOCAL_WRITE_KEY: set (writes will not ask Zotero)", fg=typer.colors.GREEN
+        )
+    else:
+        typer.secho(
+            "  ZOTERO_LOCAL_WRITE_KEY: not stored yet (first write asks once)",
+            fg=typer.colors.YELLOW,
+        )
     if not os.environ.get("OPENROUTER_API_KEY"):
         typer.echo(
             f"    put it in {Path('.env').resolve()} "
@@ -719,6 +731,27 @@ def _zotero_client(config: Config) -> ZoteroClient:
         timeout_seconds=config.zotero.timeout_seconds,
         authorize_timeout_seconds=config.zotero.authorize_timeout_seconds,
         app_name=config.zotero.app_name,
+        write_key=zotero_write_key(),
+        on_write_key=_remember_write_key,
+    )
+
+
+def _remember_write_key(key: str) -> None:
+    """Keep a freshly granted key in .env, so later runs ask Zotero nothing."""
+    try:
+        path = store_zotero_write_key(key)
+    except OSError as exc:
+        typer.secho(
+            f"warning: could not store the Zotero write key ({exc}); the next run "
+            "will ask Zotero again",
+            fg=typer.colors.YELLOW,
+            err=True,
+        )
+        return
+    typer.secho(
+        f"Zotero granted a write key; stored in {path} (delete that line, or use "
+        "Settings -> Advanced -> Clear Write Authorizations, to revoke)",
+        fg=typer.colors.YELLOW,
     )
 
 

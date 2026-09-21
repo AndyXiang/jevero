@@ -633,3 +633,58 @@ def test_ensure_collection_path_is_cached_within_a_run():
 
     assert first == second
     assert len(api.created) == 2  # parent + child, created once
+
+
+# --------------------------------------------------------------------------- #
+# remembering the write key in .env
+# --------------------------------------------------------------------------- #
+
+
+def test_a_stored_key_is_reused_without_asking_zotero(zotero_item_payload: dict):
+    """This is what removes the per-run dialog."""
+    api = LocalApi()
+
+    with ZoteroClient(
+        base_url=LOCAL_BASE_URL,
+        write_key="stored-key",
+        http_client=httpx.Client(transport=httpx.MockTransport(api.handler)),
+    ) as client:
+        client.apply_actions(
+            _item(zotero_item_payload), PolicyActions(add_tags={"agent/processed"})
+        )
+
+    assert api.authorize_calls == 0
+    assert api.patch_headers[0]["Zotero-API-Key"] == "stored-key"
+
+
+def test_a_new_key_is_reported_back_for_storage():
+    api = LocalApi()
+    seen: list[str] = []
+
+    with ZoteroClient(
+        base_url=LOCAL_BASE_URL,
+        on_write_key=seen.append,
+        http_client=httpx.Client(transport=httpx.MockTransport(api.handler)),
+    ) as client:
+        client.authorize_writes()
+
+    assert seen == ["local-key-1"]
+
+
+def test_a_stale_stored_key_is_replaced_after_a_401(zotero_item_payload: dict):
+    api = LocalApi(reject_first_patch_with_401=True)
+    seen: list[str] = []
+
+    with ZoteroClient(
+        base_url=LOCAL_BASE_URL,
+        write_key="stale-key",
+        on_write_key=seen.append,
+        http_client=httpx.Client(transport=httpx.MockTransport(api.handler)),
+    ) as client:
+        client.apply_actions(
+            _item(zotero_item_payload), PolicyActions(add_tags={"agent/processed"})
+        )
+
+    assert api.authorize_calls == 1
+    assert seen == ["local-key-1"]
+    assert api.patch_headers[1]["Zotero-API-Key"] == "local-key-1"
