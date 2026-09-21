@@ -18,7 +18,9 @@ zotero:
   # It must be enabled in Zotero: Settings -> Advanced -> "Allow other
   # applications on this computer to communicate with Zotero".
   base_url: "http://127.0.0.1:23119/api"
-  # The actual collection name in this library (there is no "00 Inbox").
+  # Which collection to classify. Matched against the collection name, or
+  # against a "Parent/Child" path when names repeat. List them with:
+  #   jevero collections
   inbox_collection: "00 Read NOW!!!"
   timeout_seconds: 30.0
   # Writes are not available yet: they need a local API key granted at runtime.

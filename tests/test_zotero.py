@@ -16,6 +16,7 @@ from jevero.models import PolicyActions
 from jevero.zotero import (
     LOCAL_BASE_URL,
     ZoteroAuthorizationDeniedError,
+    ZoteroCollectionAmbiguousError,
     ZoteroAuthorizationError,
     ZoteroClient,
     ZoteroItem,
@@ -168,6 +169,51 @@ def test_iter_papers_honours_the_limit():
         papers = list(client.iter_papers(collection_key="INBOX123", limit=2))
 
     assert len(papers) == 2
+
+
+def _collections_handler(collections: list[dict]):
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/users/0/collections"
+        return httpx.Response(200, json=collections)
+
+    return handler
+
+
+def test_list_collections_reads_name_key_and_parent():
+    payload = [
+        {"key": "ROOT1111", "data": {"name": "02 Topics"}},
+        {"key": "CHILD222", "data": {"name": "Physics", "parentCollection": "ROOT1111"}},
+    ]
+
+    with make_client(_collections_handler(payload)) as client:
+        found = client.list_collections()
+
+    assert [(c.name, c.key, c.parent_key) for c in found] == [
+        ("02 Topics", "ROOT1111", None),
+        ("Physics", "CHILD222", "ROOT1111"),
+    ]
+
+
+def test_find_collection_key_accepts_a_full_path():
+    payload = [
+        {"key": "ROOT1111", "data": {"name": "02 Topics"}},
+        {"key": "CHILD222", "data": {"name": "Physics", "parentCollection": "ROOT1111"}},
+    ]
+
+    with make_client(_collections_handler(payload)) as client:
+        assert client.find_collection_key("02 Topics/Physics") == "CHILD222"
+
+
+def test_ambiguous_collection_names_are_refused():
+    """Silently picking one could tag the wrong collection's papers."""
+    payload = [
+        {"key": "AAAA1111", "data": {"name": "Inbox"}},
+        {"key": "BBBB2222", "data": {"name": "Inbox", "parentCollection": "AAAA1111"}},
+    ]
+
+    with make_client(_collections_handler(payload)) as client:
+        with pytest.raises(ZoteroCollectionAmbiguousError, match="AAAA1111"):
+            client.find_collection_key("Inbox")
 
 
 def test_find_collection_key_matches_by_name():

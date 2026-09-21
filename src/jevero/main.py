@@ -41,7 +41,14 @@ from .policy import (
     plan,
     review_actions,
 )
-from .zotero import ZoteroClient, ZoteroError, ZoteroItem, ZoteroWriteError
+from .zotero import (
+    ZoteroClient,
+    ZoteroError,
+    ZoteroItem,
+    ZoteroNotFoundError,
+    ZoteroWriteError,
+    collection_path,
+)
 
 DEFAULT_CONFIG = Path("config.yaml")
 
@@ -113,6 +120,12 @@ def process(
         # Setup failures (missing credentials, unreachable library) are exit
         # codes, not tracebacks.
         typer.secho(f"error: {exc}", fg=typer.colors.RED, err=True)
+        if isinstance(exc, ZoteroNotFoundError):
+            typer.secho(
+                "    run `jevero collections` to list collection names and paths",
+                fg=typer.colors.YELLOW,
+                err=True,
+            )
         raise typer.Exit(code=2) from exc
 
     typer.echo("")
@@ -124,6 +137,54 @@ def process(
         typer.echo(f"classifier cost: ${summary.cost:.6f}")
     if summary.failed:
         raise typer.Exit(code=1)
+
+
+@app.command()
+def collections(
+    config_path: Path = typer.Option(
+        DEFAULT_CONFIG, "--config", "-c", help="Path to config.yaml."
+    ),
+    counts: bool = typer.Option(
+        True, "--counts/--no-counts", help="Count papers per collection."
+    ),
+) -> None:
+    """List Zotero collections, to set `zotero.inbox_collection`."""
+    try:
+        config = load_config(config_path)
+    except ConfigError as exc:
+        typer.secho(f"configuration error: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2) from exc
+
+    configured = config.zotero.inbox_collection
+    typer.echo(f"zotero.inbox_collection = {configured!r}")
+    typer.echo("")
+
+    try:
+        with _zotero_client(config) as zotero:
+            found = zotero.list_collections()
+            by_key = {collection.key: collection for collection in found}
+            rows = sorted(
+                found, key=lambda collection: collection_path(collection, by_key).lower()
+            )
+            width = max(
+                (len(collection_path(collection, by_key)) for collection in rows),
+                default=0,
+            )
+            for collection in rows:
+                path = collection_path(collection, by_key)
+                line = f"  {path:<{width}}  {collection.key}"
+                if counts:
+                    items = list(zotero.iter_papers(collection_key=collection.key))
+                    pending = sum(
+                        1 for item in items if STATE_PROCESSED not in item.tags
+                    )
+                    line += f"  papers={len(items):<4} unprocessed={pending}"
+                if path == configured or collection.name == configured:
+                    line += "   <- configured"
+                typer.echo(line)
+    except ZoteroError as exc:
+        typer.secho(f"Zotero local API: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2) from exc
 
 
 @app.command()
@@ -186,6 +247,11 @@ def check(
                 )
     except ZoteroError as exc:
         typer.secho(f"  Zotero local API: {exc}", fg=typer.colors.RED)
+        if isinstance(exc, ZoteroNotFoundError):
+            typer.secho(
+                "    run `jevero collections` to list collection names and paths",
+                fg=typer.colors.YELLOW,
+            )
 
 
 def _run(

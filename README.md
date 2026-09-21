@@ -580,6 +580,20 @@ Zotero -> Settings -> Advanced
 If that checkbox is off, every request returns `403 Forbidden`; the client turns
 that into an error naming the setting.
 
+`zotero.inbox_collection` selects what gets classified. It is matched against
+the collection **name**, or against a `Parent/Child` path when two collections
+share a name. List them, with paper counts, using:
+
+```bash
+jevero collections
+```
+
+```text
+  00 Read NOW!!!    KRQJSKLH  papers=1    unprocessed=1   <- configured
+  02 Topics         VIW97AJZ  papers=0    unprocessed=0
+  02 Topics/Physics YRM8M87H  papers=11   unprocessed=11
+```
+
 The only credential the tool needs is for the classifier:
 
 ```bash

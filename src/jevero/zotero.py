@@ -32,7 +32,7 @@ Details that drive the shape of this module:
 from __future__ import annotations
 
 import re
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -88,6 +88,34 @@ class ZoteroAuthorizationDeniedError(ZoteroAuthorizationError):
 
 class ZoteroNotFoundError(ZoteroReadError):
     """A requested collection or item does not exist."""
+
+
+class ZoteroCollectionAmbiguousError(ZoteroReadError):
+    """More than one collection matches the configured name."""
+
+
+@dataclass(frozen=True)
+class ZoteroCollection:
+    """One collection; nesting is expressed through ``parent_key``."""
+
+    key: str
+    name: str
+    parent_key: str | None = None
+
+
+def collection_path(
+    collection: ZoteroCollection, by_key: Mapping[str, ZoteroCollection]
+) -> str:
+    """``Parent/Child`` path for a collection, for disambiguating names."""
+    parts = [collection.name]
+    parent_key = collection.parent_key
+    seen = {collection.key}
+    while parent_key and parent_key in by_key and parent_key not in seen:
+        seen.add(parent_key)
+        parent = by_key[parent_key]
+        parts.append(parent.name)
+        parent_key = parent.parent_key
+    return "/".join(reversed(parts))
 
 
 class ZoteroLocalApiDisabledError(ZoteroReadError):
@@ -213,12 +241,54 @@ class ZoteroClient:
     def library_prefix(self) -> str:
         return f"/users/{LOCAL_USER_ID}"
 
+    def list_collections(self) -> list[ZoteroCollection]:
+        """Every collection in the library, nested ones included.
+
+        The local API returns a flat list; nesting is expressed by
+        ``parentCollection``, so callers get both the name and the parent key.
+        """
+        collections: list[ZoteroCollection] = []
+        for raw in self._iter_pages(f"{self.library_prefix}/collections"):
+            data = raw.get("data") or {}
+            key = raw.get("key") or data.get("key")
+            name = data.get("name")
+            if not key or not isinstance(name, str):
+                continue
+            parent = data.get("parentCollection")
+            collections.append(
+                ZoteroCollection(
+                    key=str(key),
+                    name=name,
+                    parent_key=str(parent) if parent else None,
+                )
+            )
+        return collections
+
     def find_collection_key(self, name: str) -> str:
-        """Resolve a collection name such as ``00 Inbox`` to its key."""
-        for collection in self._iter_pages(f"{self.library_prefix}/collections"):
-            data = collection.get("data") or {}
-            if data.get("name") == name:
-                return str(collection.get("key") or data.get("key"))
+        """Resolve a configured collection to its key.
+
+        ``name`` is matched against the collection name first, then against the
+        full path such as ``02 Topics/Physics``. A name that matches more than
+        one collection is an error rather than a silent first match: writing
+        tags to the wrong collection's papers would be a real mistake.
+        """
+        collections = self.list_collections()
+        by_key = {collection.key: collection for collection in collections}
+
+        for describe, matches in (
+            ("named", [c for c in collections if c.name == name]),
+            ("at path", [c for c in collections if collection_path(c, by_key) == name]),
+        ):
+            if len(matches) == 1:
+                return matches[0].key
+            if len(matches) > 1:
+                keys = ", ".join(sorted(c.key for c in matches))
+                raise ZoteroCollectionAmbiguousError(
+                    f"{len(matches)} collections are {describe} {name!r} "
+                    f"(keys: {keys}); rename one, or use a full path like "
+                    f"'Parent/Child'"
+                )
+
         raise ZoteroNotFoundError(f"no Zotero collection named {name!r}")
 
     def iter_papers(

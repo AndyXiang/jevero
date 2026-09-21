@@ -17,7 +17,13 @@ from jevero.config import Config
 from jevero.jev import JevOutcome, JevTransportError
 from jevero.main import app
 from jevero.models import PolicyActions, Usage
-from jevero.zotero import ZoteroClient, ZoteroError, ZoteroItem, ZoteroWriteError
+from jevero.zotero import (
+    ZoteroClient,
+    ZoteroCollection,
+    ZoteroError,
+    ZoteroItem,
+    ZoteroWriteError,
+)
 
 COLLECTION_KEY = "INBOX123"
 
@@ -99,6 +105,14 @@ class FakeZotero:
         return ZoteroItem(
             key=self._item["key"], version=self._item["version"], data=self._item["data"]
         )
+
+    def list_collections(self):
+        self.read_paths.append("collections")
+        return [
+            ZoteroCollection(key=COLLECTION_KEY, name="00 Inbox"),
+            ZoteroCollection(key="TOPICS11", name="02 Topics"),
+            ZoteroCollection(key="PHYS2222", name="Physics", parent_key="TOPICS11"),
+        ]
 
     def find_collection_key(self, name: str) -> str:
         self.read_paths.append(f"collections:{name}")
@@ -296,6 +310,22 @@ def test_include_processed_reconsiders_them(
 
     assert result.exit_code == 0, result.output
     assert len(zotero.applied) == 1
+
+
+def test_collections_command_lists_paths_and_marks_the_configured_one(
+    monkeypatch, config_path: Path
+):
+    zotero = FakeZotero(ITEM)
+    wire(monkeypatch, zotero, FakeJevClient())
+
+    result = CliRunner().invoke(
+        app, ["collections", "--config", str(config_path), "--no-counts"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "zotero.inbox_collection = '00 Inbox'" in result.output
+    assert "02 Topics/Physics" in result.output
+    assert "<- configured" in result.output
 
 
 def test_setup_failure_exits_cleanly_without_a_traceback(
