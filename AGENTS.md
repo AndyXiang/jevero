@@ -547,6 +547,27 @@ classify
 
 Keep taxonomy definitions human-readable and version-control friendly.
 
+### Describe a topic positively
+
+State what a topic covers, including the borderline sub-cases that belong to it. Do
+**not** add exclusion clauses such as "not for papers about X, which belong to Y".
+
+That was tried on the real library and it backfired measurably: the model split its
+probability across the two neighbours and cleared neither, so papers that had been
+correctly tagged became untagged. Examples from one run: a generalized-detector paper
+fell from `energy-correlator` 0.95 to 0.75 with `jet` 0.13 (tagged -> `ambiguous`),
+`scet` on an energy-correlator paper fell from 0.72 to 0.13, and two dihadron
+fragmentation papers lost `fragmentation` after a "not TMD fragmentation" clause was
+added. Rewriting the same descriptions as positive enumerations restored every one of
+those judgements without touching the threshold.
+
+One topic per axis. A topic that the model applies to every paper, or to none, carries
+no information: on this library `perturbative-qcd`, `collider-phenomenology`,
+`experiment`, `amplitudes`, and `loop-integrals` were applied to 0 of 29 papers (they
+duplicated `roles`, or were implied by a more specific topic), so they were deleted.
+`roles` already carries the activity axis (`theory` / `method` / `phenomenology` /
+`experiment`); topics should not restate it.
+
 ---
 
 ## Testing

@@ -38,18 +38,73 @@ classification:
   # prompt string in jev.py.
   scope: >
     The reader's research literature: perturbative QCD, effective field theories
-    (NRQCD, pNRQCD, SCET), heavy-flavor and quarkonium physics, energy
-    correlators and energy-flow observables, collider phenomenology, scattering
-    amplitudes and loop integrals, and closely related computational methods.
-    Excluded: work with no plausible connection to QCD or collider physics,
-    such as unrelated machine-learning methods, astrophysics, or pure
-    mathematics.
+    (NRQCD, pNRQCD, SCET), heavy-quark and quarkonium physics, energy
+    correlators and energy-flow observables, transverse-momentum-dependent and
+    fragmentation physics, jets and event shapes, chiral symmetry breaking, and
+    closely related computational methods. Excluded: work with no plausible
+    connection to QCD or collider physics, such as unrelated machine-learning
+    methods, astrophysics, or pure mathematics.
 
+# Topics answer one question: what is this paper about? They are grouped by
+# axis only to keep the list honest - a topic must be a subject a reader would
+# browse for, not a restatement of an axis that is already covered elsewhere.
+#
+# Deliberately absent, because they carried no information and rode along on top
+# of the specific topics that imply them (measured on 29 papers: 0 applications
+# each, while their stored tags had accumulated anyway):
+#   perturbative-qcd        implied by nrqcd / pnrqcd / scet
+#   collider-phenomenology  duplicates kind/phenomenology
+#   experiment              duplicates kind/experiment
+#   amplitudes, loop-integrals  no paper in the library rests on them
 topics:
+  # --- what the paper studies ---
   energy-correlator:
     description: >
-      Energy correlators, energy-energy correlations, energy-flow observables,
-      and related angular correlations.
+      Energy-energy correlators, N-point energy correlators, energy-flow
+      operators, and generalized detectors, together with the factorization,
+      resummation, or measurement specific to those observables.
+
+  fragmentation:
+    description: >
+      Fragmentation functions and hadron production through fragmentation:
+      single- and dihadron fragmentation functions, their evolution and fits,
+      fragmentation factorization, and the fragmentation contribution to
+      quarkonium production.
+
+  jet:
+    description: >
+      Jets and jet-like collider observables: jet production and jet algorithms,
+      jet functions and jet substructure, grooming and tagging, and event-shape
+      or thrust-like observables such as thrust, the C-parameter, and jet mass.
+
+  quarkonium:
+    description: >
+      Production, decay, spectroscopy, or structure of heavy quarkonium.
+
+  heavy-flavor:
+    description: >
+      Heavy-quark production, fragmentation, heavy-flavor hadrons, and related
+      perturbative or nonperturbative physics.
+
+  lattice-qcd:
+    description: >
+      Lattice gauge theory and lattice QCD: numerical simulation of QCD on a
+      spacetime lattice, hadronic matrix elements and spectra, wave functions
+      and structure of bound states, and other nonperturbative quantities
+      obtained from the lattice.
+
+  chiral-dynamics:
+    description: >
+      Spontaneous chiral symmetry breaking and its low-energy description:
+      chiral Lagrangians and chiral perturbation theory, the pion and Goldstone
+      sector, and the QCD vacuum and its condensates.
+
+  # --- which framework or formalism the paper is built on ---
+  tmd:
+    description: >
+      Transverse-momentum-dependent factorization: TMD parton distributions and
+      TMD fragmentation functions, Collins-Soper evolution, rapidity
+      divergences, and nonperturbative Sudakov resummation.
 
   nrqcd:
     description: >
@@ -62,54 +117,9 @@ topics:
 
   scet:
     description: >
-      Soft-collinear effective theory, jet factorization, endpoint
-      factorization, and related resummation.
-
-  quarkonium:
-    description: >
-      Production, decay, spectroscopy, or structure of heavy quarkonium.
-
-  heavy-flavor:
-    description: >
-      Heavy-quark production, fragmentation, heavy-flavor hadrons, and related
-      perturbative or nonperturbative physics.
-
-  fragmentation:
-    description: >
-      Fragmentation functions, hadron production through fragmentation,
-      evolution, and fragmentation factorization.
-
-  perturbative-qcd:
-    description: >
-      Fixed-order and resummed perturbative QCD calculations, including
-      higher-order corrections.
-
-  amplitudes:
-    description: >
-      Scattering amplitudes, helicity methods, analytic structures, amplitude
-      construction, and related formal methods.
-
-  loop-integrals:
-    description: >
-      Loop integration, IBP reduction, differential equations, master
-      integrals, and automated multi-loop computation.
-
-  collider-phenomenology:
-    description: >
-      Collider predictions, observable-level phenomenology, event
-      distributions, and comparison with collider data.
-
-  experiment:
-    description: >
-      Experimental measurements, detector-level analyses, and direct
-      presentation of collider data.
-
-  lattice-qcd:
-    description: >
-      Lattice gauge theory and lattice QCD: numerical simulation of QCD on a
-      spacetime lattice, hadronic matrix elements and spectra, wave functions
-      and structure of bound states, and other nonperturbative quantities
-      obtained from the lattice.
+      Soft-collinear effective theory and the factorization or resummation built
+      on it: jet, threshold, and endpoint factorization, rapidity
+      renormalization, and soft functions.
 
 # NOTE: a `projects` dimension (per-project usefulness) is designed but not
 # implemented yet. See docs/projects-design.md before adding it back here.

@@ -190,18 +190,20 @@ The first version should prefer tags over automatic collection changes.
 ### Topic tags
 
 ```text
+# what the paper studies
 topic/energy-correlator
+topic/fragmentation
+topic/tmd
+topic/jet
+topic/quarkonium
+topic/heavy-flavor
+topic/lattice-qcd
+topic/chiral-dynamics
+
+# which framework the paper is built on
 topic/nrqcd
 topic/pnrqcd
 topic/scet
-topic/quarkonium
-topic/heavy-flavor
-topic/fragmentation
-topic/perturbative-qcd
-topic/amplitudes
-topic/loop-integrals
-topic/collider-phenomenology
-topic/experiment
 ```
 
 ### Project tags
@@ -274,10 +276,54 @@ Example:
 
 ```yaml
 topics:
+  # --- what the paper studies ---
   energy-correlator:
     description: >
-      Energy correlators, energy-energy correlations,
-      energy-flow observables, and related angular correlations.
+      Energy-energy correlators, N-point energy correlators, energy-flow
+      operators, and generalized detectors, together with the factorization,
+      resummation, or measurement specific to those observables.
+
+  fragmentation:
+    description: >
+      Fragmentation functions and hadron production through fragmentation:
+      single- and dihadron fragmentation functions, their evolution and fits,
+      fragmentation factorization, and the fragmentation contribution to
+      quarkonium production.
+
+  jet:
+    description: >
+      Jets and jet-like collider observables: jet production and jet algorithms,
+      jet functions and jet substructure, grooming and tagging, and event-shape
+      or thrust-like observables such as thrust, the C-parameter, and jet mass.
+
+  quarkonium:
+    description: >
+      Production, decay, spectroscopy, or structure of heavy quarkonium.
+
+  heavy-flavor:
+    description: >
+      Heavy-quark production, fragmentation, heavy-flavor hadrons, and related
+      perturbative or nonperturbative physics.
+
+  lattice-qcd:
+    description: >
+      Lattice gauge theory and lattice QCD: numerical simulation of QCD on a
+      spacetime lattice, hadronic matrix elements and spectra, wave functions
+      and structure of bound states, and other nonperturbative quantities
+      obtained from the lattice.
+
+  chiral-dynamics:
+    description: >
+      Spontaneous chiral symmetry breaking and its low-energy description:
+      chiral Lagrangians and chiral perturbation theory, the pion and Goldstone
+      sector, and the QCD vacuum and its condensates.
+
+  # --- which framework or formalism the paper is built on ---
+  tmd:
+    description: >
+      Transverse-momentum-dependent factorization: TMD parton distributions and
+      TMD fragmentation functions, Collins-Soper evolution, rapidity
+      divergences, and nonperturbative Sudakov resummation.
 
   nrqcd:
     description: >
@@ -290,47 +336,9 @@ topics:
 
   scet:
     description: >
-      Soft-collinear effective theory, jet factorization,
-      endpoint factorization, and related resummation.
-
-  quarkonium:
-    description: >
-      Production, decay, spectroscopy, or structure of heavy quarkonium.
-
-  heavy-flavor:
-    description: >
-      Heavy-quark production, fragmentation, heavy-flavor hadrons,
-      and related perturbative or nonperturbative physics.
-
-  fragmentation:
-    description: >
-      Fragmentation functions, hadron production through fragmentation,
-      evolution, and fragmentation factorization.
-
-  perturbative-qcd:
-    description: >
-      Fixed-order and resummed perturbative QCD calculations,
-      including higher-order corrections.
-
-  amplitudes:
-    description: >
-      Scattering amplitudes, helicity methods, analytic structures,
-      amplitude construction, and related formal methods.
-
-  loop-integrals:
-    description: >
-      Loop integration, IBP reduction, differential equations,
-      master integrals, and automated multi-loop computation.
-
-  collider-phenomenology:
-    description: >
-      Collider predictions, observable-level phenomenology,
-      event distributions, and comparison with collider data.
-
-  experiment:
-    description: >
-      Experimental measurements, detector-level analyses,
-      and direct presentation of collider data.
+      Soft-collinear effective theory and the factorization or resummation built
+      on it: jet, threshold, and endpoint factorization, rapidity
+      renormalization, and soft functions.
 
 # DEFERRED - not implemented; see docs/projects-design.md
 #
