@@ -57,6 +57,32 @@ def target_paths(tags: Iterable[str], config: Config) -> list[str]:
     return sorted(paths)
 
 
+def is_managed_path(path: str, config: Config) -> bool:
+    """True for collections this tool is responsible for.
+
+    Only these may ever be pruned. Anything the reader made by hand — an
+    ordinary folder, a collection outside the configured parents — is never
+    touched, so routing can converge without damaging their organisation.
+    """
+    settings = config.collections
+    if settings.review_collection and path == settings.review_collection:
+        return True
+    for parent in _managed_parents(config):
+        if path.startswith(parent.rstrip("/") + "/"):
+            return True
+    return False
+
+
+def _managed_parents(config: Config) -> list[str]:
+    settings = config.collections
+    parents = []
+    if settings.topics_parent:
+        parents.append(settings.topics_parent)
+    if settings.route_roles and settings.roles_parent:
+        parents.append(settings.roles_parent)
+    return parents
+
+
 def _join(parent: str, name: str) -> str:
     parent = parent.strip("/")
     return f"{parent}/{name}" if parent else name

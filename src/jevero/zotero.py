@@ -450,6 +450,10 @@ class ZoteroClient:
         self._patch_item(item, {"collections": merged}, "collections")
         return merged
 
+    def collection_paths(self) -> dict[str, str]:
+        """Existing collections as ``path -> key``, for deciding what we manage."""
+        return dict(self._load_collection_paths())
+
     def collection_key_for_path(self, path: str) -> str | None:
         """Look up an existing collection by ``Parent/Child`` path, read-only."""
         return self._load_collection_paths().get(path)

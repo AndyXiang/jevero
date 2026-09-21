@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from jevero.config import Config
-from jevero.routing import target_paths
+from jevero.routing import is_managed_path, target_paths
 
 
 def with_collections(config: Config, **changes) -> Config:
@@ -95,3 +95,21 @@ def test_review_can_be_kept_out_of_collections(config: Config):
 def test_prefix_like_tags_are_ignored(config: Config):
     """`topic/` alone has no name, and unrelated tags are not routes."""
     assert target_paths(["agent/processed", "topic/", "to-read"], config) == []
+
+
+def test_only_the_configured_namespaces_are_managed(config: Config):
+    """Pruning must never touch folders the reader made by hand."""
+    assert is_managed_path("02 Topics/nrqcd", config)
+    assert is_managed_path("03 Roles/method", config)
+    assert is_managed_path("04 Review", config)
+
+    assert not is_managed_path("00 Inbox", config)
+    assert not is_managed_path("01 Projects/AmpNet", config)
+    assert not is_managed_path("02 Topics", config)  # the parent is not a target
+
+
+def test_role_collections_are_not_managed_when_routing_roles_is_off(config: Config):
+    stub = with_collections(config, route_roles=False)
+
+    assert not is_managed_path("03 Roles/method", stub)
+    assert is_managed_path("02 Topics/nrqcd", stub)

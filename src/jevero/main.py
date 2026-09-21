@@ -31,7 +31,7 @@ from .config import (
 )
 from .jev import JevClient, JevError, JevOutcome
 from .models import InputMode, PaperRecord, PolicyActions
-from .routing import target_paths
+from .routing import is_managed_path, target_paths
 from .policy import (
     STATE_ERROR,
     STATE_PROCESSED,
@@ -206,6 +206,11 @@ def route(
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Explicitly inspect only. This is the default."
     ),
+    prune: bool = typer.Option(
+        False,
+        "--prune",
+        help="Also drop managed memberships the tags no longer point at.",
+    ),
     limit: int = typer.Option(0, "--limit", help="Stop after N papers (0 = no limit)."),
 ) -> None:
     """File papers into collections based on the tags they already have.
@@ -223,7 +228,7 @@ def route(
 
     try:
         config = load_config(config_path)
-        summary = _route(config, mutate=mutate, limit=limit or None)
+        summary = _route(config, mutate=mutate, prune=prune, limit=limit or None)
     except ConfigError as exc:
         typer.secho(f"configuration error: {exc}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=2) from exc
@@ -347,13 +352,22 @@ def _run(
     return summary
 
 
-def _route(config: Config, *, mutate: bool, limit: int | None) -> RouteSummary:
+def _route(
+    config: Config, *, mutate: bool, prune: bool, limit: int | None
+) -> RouteSummary:
     """File each inbox paper into the collections its tags point at."""
     summary = RouteSummary()
     settings = config.collections
+    managed: set[str] = set()
     with _zotero_client(config) as zotero:
         if mutate:
             zotero.ensure_writes_available()
+        if prune:
+            managed = {
+                key
+                for path, key in zotero.collection_paths().items()
+                if is_managed_path(path, config)
+            }
         collection_key = zotero.find_collection_key(config.zotero.inbox_collection)
         typer.echo(
             f"Inbox {config.zotero.inbox_collection!r} ({collection_key}) "
@@ -376,17 +390,21 @@ def _route(config: Config, *, mutate: bool, limit: int | None) -> RouteSummary:
 
             add = {key for key in resolved.values() if key}
             missing = [path for path, key in resolved.items() if key is None]
-            remove = (
-                {collection_key}
-                if settings.remove_from_inbox and collection_key not in add
-                else set()
-            )
+            remove = set()
+            if settings.remove_from_inbox and collection_key not in add:
+                remove.add(collection_key)
+            if prune:
+                # Converge: managed collections the tags no longer point at are
+                # dropped, so a re-run reflects the current tags exactly.
+                remove |= (managed & current) - add
 
             if not missing and add <= current and not remove & current:
                 summary.skipped += 1
                 continue
 
-            _render_route(item, resolved, remove, mutate=mutate)
+            _render_route(
+                item, resolved, remove, zotero=zotero, mutate=mutate
+            )
             if mutate:
                 try:
                     zotero.apply_membership(item, add=add, remove=remove)
@@ -415,6 +433,7 @@ def _render_route(
     resolved: dict[str, str | None],
     remove: set[str],
     *,
+    zotero: ZoteroClient,
     mutate: bool,
 ) -> None:
     title = str(item.data.get("title") or "").strip()
@@ -422,8 +441,9 @@ def _render_route(
     for path, key in resolved.items():
         suffix = "" if key else "   (does not exist yet)"
         typer.secho(f"  + {path}{suffix}", fg=typer.colors.GREEN)
-    if remove:
-        typer.secho("  - inbox", fg=typer.colors.RED)
+    by_key = {key: path for path, key in zotero.collection_paths().items()}
+    for key in sorted(remove):
+        typer.secho(f"  - {by_key.get(key, key)}", fg=typer.colors.RED)
 
 
 def _process_one(

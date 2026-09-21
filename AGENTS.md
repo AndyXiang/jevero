@@ -418,6 +418,8 @@ agent/review/missing-abstract # too little text to judge
 
 State and reason are deliberately separate: `agent/review` answers "does a human need to look?" while the reason selects the queue and names the next action. `agent/error` removes the review state and its reasons, so a failed paper sits in exactly one queue.
 
+The `agent/*` namespace is managed as a whole: a plan also emits `remove_tags` for every managed state tag it does not ask for, so reclassifying a paper converges on the current judgement instead of accumulating the union of every rule ever run. `topic/*` and `role/*` stay add-only — a human may have added them and probabilities drift between runs.
+
 Do not add a local database yet.
 
 Candidate selection should ignore already processed papers unless the user explicitly requests reclassification.

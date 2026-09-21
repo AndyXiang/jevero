@@ -17,6 +17,7 @@ from jevero.config import Config
 from jevero.jev import JevOutcome, JevTransportError
 from jevero.main import app
 from jevero.models import PolicyActions, Usage
+from jevero.policy import PROCESSING_STATES
 from jevero.zotero import (
     ZoteroClient,
     ZoteroCollection,
@@ -121,6 +122,9 @@ class FakeZotero:
         self.read_paths.append(f"collections:{name}")
         return COLLECTION_KEY
 
+    def collection_paths(self) -> dict[str, str]:
+        return dict(self._paths)
+
     def collection_key_for_path(self, path: str) -> str | None:
         return self._paths.get(path)
 
@@ -220,7 +224,9 @@ def test_apply_writes_only_policy_tags(
         "role/core",
         "topic/quarkonium",
     }
-    assert zotero.applied[0].remove_tags == set()
+    # The plan reports the whole managed state, so a re-run clears any state tag
+    # an older policy left behind instead of accumulating them.
+    assert zotero.applied[0].remove_tags == PROCESSING_STATES - {"agent/processed"}
 
 
 def test_apply_fails_fast_when_writes_are_unavailable(
@@ -458,3 +464,95 @@ def test_route_and_apply_flags_are_mutually_exclusive(config_path: Path):
     )
 
     assert result.exit_code != 0
+
+
+def test_route_prune_drops_managed_membership_the_tags_no_longer_point_at(
+    monkeypatch, config_path: Path, tmp_path: Path
+):
+    """Convergence: the review tag is gone, so 04 Review must go too."""
+    zotero = FakeZotero(CLASSIFIED_WITHOUT_REVIEW)
+    zotero._paths = {
+        "02 Topics/loop-integrals": "TOPIC111",
+        "04 Review": "REVIEW11",
+    }
+    zotero._item["data"]["collections"] = [COLLECTION_KEY, "REVIEW11"]
+    wire(monkeypatch, zotero, FakeJevClient())
+
+    result = CliRunner().invoke(
+        app, ["route", "--config", str(config_path), "--apply", "--prune"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert zotero.membership == [({"TOPIC111"}, {"REVIEW11"})]
+
+
+def test_route_prune_never_touches_collections_we_do_not_manage(
+    monkeypatch, config_path: Path
+):
+    """A folder the reader made by hand must survive pruning."""
+    zotero = FakeZotero(CLASSIFIED_WITHOUT_REVIEW)
+    zotero._paths = {
+        "02 Topics/loop-integrals": "TOPIC111",
+        "04 Review": "REVIEW11",
+        "01 Projects/AmpNet": "MINE0001",
+    }
+    zotero._item["data"]["collections"] = [COLLECTION_KEY, "REVIEW11", "MINE0001"]
+    wire(monkeypatch, zotero, FakeJevClient())
+
+    result = CliRunner().invoke(
+        app, ["route", "--config", str(config_path), "--apply", "--prune"]
+    )
+
+    assert result.exit_code == 0, result.output
+    add, remove = zotero.membership[0]
+    assert add == {"TOPIC111"}
+    assert remove == {"REVIEW11"}
+    assert "MINE0001" not in add | remove
+
+
+def test_route_without_prune_keeps_stale_membership(
+    monkeypatch, config_path: Path
+):
+    zotero = FakeZotero(CLASSIFIED_WITHOUT_REVIEW)
+    zotero._paths = {"02 Topics/loop-integrals": "TOPIC111", "04 Review": "REVIEW11"}
+    zotero._item["data"]["collections"] = [COLLECTION_KEY, "REVIEW11"]
+    wire(monkeypatch, zotero, FakeJevClient())
+
+    result = CliRunner().invoke(
+        app, ["route", "--config", str(config_path), "--apply"]
+    )
+
+    assert result.exit_code == 0, result.output
+    add, remove = zotero.membership[0]
+    assert add == {"TOPIC111"}
+    # Without --prune the stale review membership is left alone.
+    assert remove == set()
+
+
+def test_route_prune_dry_run_shows_the_removal_but_writes_nothing(
+    monkeypatch, config_path: Path
+):
+    zotero = FakeZotero(CLASSIFIED_WITHOUT_REVIEW)
+    zotero._paths = {"02 Topics/loop-integrals": "TOPIC111", "04 Review": "REVIEW11"}
+    zotero._item["data"]["collections"] = [COLLECTION_KEY, "REVIEW11"]
+    wire(monkeypatch, zotero, FakeJevClient())
+
+    result = CliRunner().invoke(
+        app, ["route", "--config", str(config_path), "--prune"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "- 04 Review" in result.output
+    assert zotero.membership == []
+    assert zotero.created == []
+
+
+CLASSIFIED_WITHOUT_REVIEW = {
+    "key": "ABCD2345",
+    "version": 420,
+    "data": {
+        **ITEM["data"],
+        "tags": [{"tag": "topic/loop-integrals"}, {"tag": "agent/processed"}],
+        "collections": [COLLECTION_KEY],
+    },
+}

@@ -613,8 +613,9 @@ has. It never calls the classifier, so re-running it after changing the settings
 below costs nothing.
 
 ```bash
-jevero route --dry-run     # show the plan (default)
-jevero route --apply       # create the collections and file the papers
+jevero route --dry-run               # show the plan (default)
+jevero route --apply                 # create the collections and file the papers
+jevero route --apply --prune         # also drop memberships the tags no longer imply
 ```
 
 ```yaml
@@ -628,8 +629,32 @@ collections:
 
 Missing collections are created. `collections` is a complete list on write, so
 membership is merged rather than replaced: collections this tool knows nothing
-about are never dropped, and only the inbox is ever removed from. A paper in
-review is filed in its topic collection *and* the review queue.
+about are never dropped. A paper in review is filed in its topic collection
+*and* the review queue.
+
+`--prune` makes routing converge: a paper is removed from the managed
+collections (`topics_parent/*`, `roles_parent/*`, the review queue) that its
+tags no longer point at. Anything outside those namespaces — your own folders —
+is never touched. Without `--prune`, routing only ever adds.
+
+### Reclassification converges
+
+A re-run replaces the state instead of accumulating it. `agent/processed`,
+`agent/review`, `agent/error` and the review reasons are one mutually exclusive
+namespace: a plan also removes the state tags it does not ask for, so a paper
+processed under an older rule loses the tags that rule produced. Running twice
+changes nothing the second time.
+
+`topic/*` and `role/*` stay add-only: you may have added them by hand, and the
+model's probabilities drift by a few hundredths between runs, so removing them
+would delete your intent and flap.
+
+To make an already-tagged paper follow a new rule, include it explicitly:
+
+```bash
+jevero process --apply --include-processed --limit 1
+jevero route --apply --prune
+```
 
 ### Writing tags: local API authorization
 

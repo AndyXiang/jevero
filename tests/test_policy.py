@@ -261,3 +261,41 @@ def test_plan_is_deterministic(config, result_factory):
     result = result_factory(topics={"quarkonium": 0.9, "nrqcd": 0.9})
 
     assert plan(result, config) == plan(result, config)
+
+
+def test_reclassification_converges(config, result_factory):
+    """A re-run replaces the managed state instead of accumulating it.
+
+    `merge_tags` is the write-side arithmetic, so this is the whole loop: plan,
+    apply to a tag list, plan again.
+    """
+    from jevero.zotero import merge_tags
+
+    stale = [
+        "agent/processed",
+        "agent/review",
+        "agent/review/ambiguous",
+        "topic/loop-integrals",
+    ]
+    actions = plan(result_factory(topics={"quarkonium": 0.97}), config)
+
+    after_first = merge_tags(stale, actions)
+    after_second = merge_tags(after_first, actions)
+
+    # The superseded review state is gone...
+    assert set(after_first) == {
+        "agent/processed",
+        "topic/loop-integrals",
+        "topic/quarkonium",
+    }
+    # ...and a second run changes nothing.
+    assert after_second == after_first
+
+
+def test_semantic_tags_are_not_removed_by_convergence(config, result_factory):
+    """`topic/*` stays add-only: a human may have added it, and probabilities drift."""
+    actions = plan(result_factory(topics={"quarkonium": 0.97}), config)
+
+    assert "topic/loop-integrals" not in actions.remove_tags
+    assert "role/method" not in actions.remove_tags
+    assert "topic/quarkonium" in actions.add_tags

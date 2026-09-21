@@ -127,7 +127,7 @@ def plan(
     # A paper that was classified successfully is marked processed even when it
     # is out of scope or flagged for review; the flags are what the human reads.
     actions.add_tags.add(STATE_PROCESSED)
-    return actions
+    return _converged(actions)
 
 
 def error_actions() -> PolicyActions:
@@ -137,10 +137,7 @@ def error_actions() -> PolicyActions:
     queue, ``agent/error``, so a stale review reason cannot linger. It stays in
     the candidate set and remains recoverable.
     """
-    return PolicyActions(
-        add_tags={STATE_ERROR},
-        remove_tags={STATE_PROCESSED, STATE_REVIEW} | set(REVIEW_REASONS),
-    )
+    return _converged(PolicyActions(add_tags={STATE_ERROR}))
 
 
 def review_actions() -> PolicyActions:
@@ -149,7 +146,27 @@ def review_actions() -> PolicyActions:
     Used when an abstract is missing and title-only classification is disabled:
     the paper is never treated as processed, and the reason records why.
     """
-    return PolicyActions(add_tags={STATE_REVIEW, REASON_MISSING_ABSTRACT})
+    return _converged(
+        PolicyActions(add_tags={STATE_REVIEW, REASON_MISSING_ABSTRACT})
+    )
+
+
+def _converged(actions: PolicyActions) -> PolicyActions:
+    """Report the full managed state, so a re-run removes superseded state tags.
+
+    ``add_tags`` alone is not enough: a plan that no longer wants
+    ``agent/review`` would leave the tag a previous run (or an older policy)
+    wrote, and the library would accumulate the union of every judgement ever
+    made. Removing every managed state tag the plan does not ask for makes
+    reclassification converge instead of accumulating.
+
+    Only the ``agent/*`` namespace is managed this way. ``topic/*`` and
+    ``role/*`` stay add-only: a human may have added them by hand, and the
+    model's probabilities drift by a few hundredths between runs, so removing
+    them would delete intent and flap.
+    """
+    actions.remove_tags |= PROCESSING_STATES - actions.add_tags
+    return actions
 
 
 def _above(
