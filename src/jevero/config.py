@@ -133,6 +133,26 @@ class ClassificationConfig(BaseModel):
     scope: str = ""
 
 
+class CollectionsConfig(BaseModel):
+    """Tag-driven Zotero collection routing.
+
+    Collections are a projection of the tags: ``topic/<name>`` lands in
+    ``<topics_parent>/<name>`` and ``role/<name>`` in ``<roles_parent>/<name>``.
+    Anything missing is created, because routing by tag only works if the
+    target exists.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    topics_parent: str = "02 Topics"
+    roles_parent: str = "03 Roles"
+    #: All review reasons share one queue unless this is changed.
+    review_collection: str = "04 Review"
+    route_roles: bool = True
+    #: Move routed papers out of the inbox, keeping it a real work queue.
+    remove_from_inbox: bool = False
+
+
 class Config(BaseModel):
     """The validated contents of ``config.yaml``.
 
@@ -146,6 +166,7 @@ class Config(BaseModel):
     zotero: ZoteroConfig = ZoteroConfig()
     classification: ClassificationConfig = ClassificationConfig()
 
+    collections: CollectionsConfig = CollectionsConfig()
     topics: dict[str, TaxonomyEntry]
     roles: dict[str, str] = Field(default_factory=dict)
     coverage: dict[str, str] = Field(default_factory=dict)

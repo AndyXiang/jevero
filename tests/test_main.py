@@ -95,6 +95,9 @@ class FakeZotero:
         self._writes_available = writes_available
         self.applied: list[PolicyActions] = []
         self.read_paths: list[str] = []
+        self.created: list[str] = []
+        self.membership: list[tuple[set[str], set[str]]] = []
+        self._paths: dict[str, str] = {}
 
     @property
     def supports_write(self) -> bool:
@@ -117,6 +120,22 @@ class FakeZotero:
     def find_collection_key(self, name: str) -> str:
         self.read_paths.append(f"collections:{name}")
         return COLLECTION_KEY
+
+    def collection_key_for_path(self, path: str) -> str | None:
+        return self._paths.get(path)
+
+    def ensure_collection_path(self, path: str) -> str:
+        existing = self._paths.get(path)
+        if existing:
+            return existing
+        self.created.append(path)
+        key = f"KEY{len(self.created):05d}"
+        self._paths[path] = key
+        return key
+
+    def apply_membership(self, item, *, add, remove) -> list[str]:
+        self.membership.append((set(add), set(remove)))
+        return sorted(set(item.data.get("collections") or []) | add - remove)
 
     def iter_papers(self, *, collection_key=None, limit=None):
         self.read_paths.append(f"items:{collection_key}")
@@ -343,3 +362,99 @@ def test_setup_failure_exits_cleanly_without_a_traceback(
     assert result.exit_code == 2
     assert "could not reach the Zotero local API" in result.output
     assert "Traceback" not in result.output
+
+
+# --------------------------------------------------------------------------- #
+# route: tags -> collections (no classifier involved)
+# --------------------------------------------------------------------------- #
+
+CLASSIFIED_ITEM = {
+    "key": "ABCD2345",
+    "version": 419,
+    "data": {
+        **ITEM["data"],
+        "tags": [
+            {"tag": "topic/loop-integrals"},
+            {"tag": "agent/processed"},
+            {"tag": "agent/review"},
+            {"tag": "agent/review/ambiguous"},
+        ],
+        "collections": [COLLECTION_KEY],
+    },
+}
+
+
+def test_route_dry_run_writes_nothing(monkeypatch, config_path: Path):
+    zotero = FakeZotero(CLASSIFIED_ITEM)
+    wire(monkeypatch, zotero, FakeJevClient())
+
+    result = CliRunner().invoke(app, ["route", "--config", str(config_path)])
+
+    assert result.exit_code == 0, result.output
+    assert "02 Topics/loop-integrals" in result.output
+    assert "04 Review" in result.output
+    assert "does not exist yet" in result.output
+    assert zotero.created == []
+    assert zotero.membership == []
+
+
+def test_route_apply_creates_targets_and_files_the_paper(
+    monkeypatch, config_path: Path
+):
+    zotero = FakeZotero(CLASSIFIED_ITEM)
+    wire(monkeypatch, zotero, FakeJevClient())
+
+    result = CliRunner().invoke(app, ["route", "--config", str(config_path), "--apply"])
+
+    assert result.exit_code == 0, result.output
+    assert zotero.created == ["02 Topics/loop-integrals", "04 Review"]
+    assert zotero.membership == [({"KEY00001", "KEY00002"}, set())]
+
+
+def test_route_skips_papers_that_were_never_classified(monkeypatch, config_path: Path):
+    zotero = FakeZotero(ITEM)  # no agent/processed tag
+    wire(monkeypatch, zotero, FakeJevClient())
+
+    result = CliRunner().invoke(app, ["route", "--config", str(config_path), "--apply"])
+
+    assert result.exit_code == 0, result.output
+    assert "0 routed, 1 unchanged" in result.output
+    assert zotero.membership == []
+
+
+def test_route_does_not_create_what_already_exists(monkeypatch, config_path: Path):
+    zotero = FakeZotero(CLASSIFIED_ITEM)
+    zotero._paths = {"02 Topics/loop-integrals": "EXIST111", "04 Review": "EXIST222"}
+    wire(monkeypatch, zotero, FakeJevClient())
+
+    result = CliRunner().invoke(app, ["route", "--config", str(config_path), "--apply"])
+
+    assert result.exit_code == 0, result.output
+    assert zotero.created == []
+    assert zotero.membership == [({"EXIST111", "EXIST222"}, set())]
+
+
+def test_route_can_remove_routed_papers_from_the_inbox(
+    monkeypatch, config_path: Path, tmp_path: Path
+):
+    routed_config = tmp_path / "config.yaml"
+    routed_config.write_text(
+        config_path.read_text()
+        + "\ncollections:\n  remove_from_inbox: true\n",
+        encoding="utf-8",
+    )
+    zotero = FakeZotero(CLASSIFIED_ITEM)
+    wire(monkeypatch, zotero, FakeJevClient())
+
+    result = CliRunner().invoke(app, ["route", "--config", str(routed_config), "--apply"])
+
+    assert result.exit_code == 0, result.output
+    assert zotero.membership == [({"KEY00001", "KEY00002"}, {COLLECTION_KEY})]
+
+
+def test_route_and_apply_flags_are_mutually_exclusive(config_path: Path):
+    result = CliRunner().invoke(
+        app, ["route", "--config", str(config_path), "--apply", "--dry-run"]
+    )
+
+    assert result.exit_code != 0

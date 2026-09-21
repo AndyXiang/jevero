@@ -147,6 +147,19 @@ coverage:
       The paper is outside the intended literature scope and does not justify
       a new topic.
 
+collections:
+  # Collections are a projection of the tags: topic/<name> lands in
+  # "<topics_parent>/<name>", role/<name> in "<roles_parent>/<name>", and every
+  # agent/review* paper lands in review_collection. Missing collections are
+  # created (Zotero 10+ local API). Nothing is ever removed from a collection
+  # except the inbox, and only when remove_from_inbox is on.
+  # Preview with: jevero route --dry-run
+  topics_parent: "02 Topics"
+  roles_parent: "03 Roles"
+  review_collection: "04 Review"
+  route_roles: true
+  remove_from_inbox: false
+
 thresholds:
   # How confident a judgement must be before it becomes a tag.
   topic_apply: 0.85

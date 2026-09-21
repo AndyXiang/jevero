@@ -165,6 +165,8 @@ The **Zotero Web API is also deferred**. Zotero is read through the desktop loca
 - **Writes need Zotero 10 or later.** They use a local API key granted at runtime (`POST /api/local/authorize`) and require `Zotero-Server-ID` on every write. "Always Allow" is mandatory: a single-use key would mean one dialog per paper. The key stays in memory and is never written to disk. Call `ensure_writes_available()` before doing work that assumes writes, so an older Zotero fails fast instead of per paper, and never claim a write succeeded without a 2xx response.
 - Do not put a `ZOTERO_API_KEY` / `ZOTERO_LIBRARY_ID` path back into active code without restoring the archived client deliberately.
 
+`jevero route` projects existing tags onto collection membership: `topic/<name>` -> `<topics_parent>/<name>`, `role/<name>` -> `<roles_parent>/<name>`, and every `agent/review*` paper into one review queue. It never calls the classifier, so it is free to re-run; it merges membership instead of replacing it, so only the inbox is ever removed from; and it creates missing collections. See `docs/collections-design.md`.
+
 ---
 
 ## Expected Repository Structure

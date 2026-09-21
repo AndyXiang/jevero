@@ -32,6 +32,7 @@ Details that drive the shape of this module:
 from __future__ import annotations
 
 import re
+import secrets
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -187,6 +188,20 @@ def merge_tags(existing: list[str], actions: PolicyActions) -> list[str]:
     return sorted(tags)
 
 
+def merge_collections(existing: list[str], *, add: set[str], remove: set[str]) -> list[str]:
+    """Apply membership changes, preserving every collection we do not manage.
+
+    Zotero treats ``collections`` as a complete list on write, so this must
+    always be the full membership that should remain. Existing order is kept so
+    the item's own organisation stays recognisable in the Zotero UI.
+    """
+    keys = [key for key in existing if key and key not in remove]
+    for key in sorted(add):
+        if key and key not in keys and key not in remove:
+            keys.append(key)
+    return keys
+
+
 class ZoteroClient:
     """Read the local Zotero library through the desktop local API."""
 
@@ -207,6 +222,7 @@ class ZoteroClient:
         self._server_id: str | None = None
         self._zotero_version: str | None = None
         self._write_key: str | None = None
+        self._collection_paths: dict[str, str] | None = None
 
     def __enter__(self) -> ZoteroClient:
         return self
@@ -406,12 +422,7 @@ class ZoteroClient:
         return key
 
     def apply_actions(self, item: ZoteroItem, actions: PolicyActions) -> list[str]:
-        """Write tags for one item, preserving every unrelated existing tag.
-
-        Authorizes on the first write (one Zotero dialog), then reuses the
-        remembered key. A ``401`` means the key was consumed or revoked, so the
-        write is retried once with a fresh authorization.
-        """
+        """Write tags for one item, preserving every unrelated existing tag."""
         if actions.is_empty:
             return item.tags
 
@@ -419,18 +430,110 @@ class ZoteroClient:
         if merged == sorted(item.tags):
             return item.tags
 
-        server_id = self._require_server_id()
-        if self._write_key is None:
-            self.authorize_writes()
-        assert self._write_key is not None  # set by authorize_writes
+        self._patch_item(item, {"tags": [{"tag": tag} for tag in merged]}, "tags")
+        return merged
 
-        response = self._patch_tags(item, merged, self._write_key, server_id)
+    def apply_membership(
+        self, item: ZoteroItem, *, add: set[str], remove: set[str]
+    ) -> list[str]:
+        """Write collection membership for one item.
+
+        ``collections`` is a complete list on write, just like tags, so the
+        existing membership is merged in rather than replaced: anything not in
+        ``remove`` survives, including collections this tool knows nothing about.
+        """
+        current = [str(key) for key in (item.data.get("collections") or [])]
+        merged = merge_collections(current, add=add, remove=remove)
+        if merged == current:
+            return current
+
+        self._patch_item(item, {"collections": merged}, "collections")
+        return merged
+
+    def collection_key_for_path(self, path: str) -> str | None:
+        """Look up an existing collection by ``Parent/Child`` path, read-only."""
+        return self._load_collection_paths().get(path)
+
+    def ensure_collection_path(self, path: str) -> str:
+        """Resolve ``Parent/Child`` to a collection key, creating what is missing.
+
+        Routing by tag only works if the target exists, so missing segments are
+        created from the root down. Resolution is cached for the run.
+        """
+        segments = [segment.strip() for segment in path.split("/") if segment.strip()]
+        if not segments:
+            raise ZoteroWriteError(f"empty collection path {path!r}")
+
+        parent_key: str | None = None
+        for depth in range(1, len(segments) + 1):
+            current_path = "/".join(segments[:depth])
+            key = self._load_collection_paths().get(current_path)
+            if key is None:
+                self._create_collection(segments[depth - 1], parent_key)
+                key = self._load_collection_paths(refresh=True).get(current_path)
+            if key is None:
+                raise ZoteroWriteError(
+                    f"Zotero did not report a collection at {current_path!r} "
+                    "after creating it"
+                )
+            parent_key = key
+        assert parent_key is not None
+        return parent_key
+
+    def _load_collection_paths(self, *, refresh: bool = False) -> dict[str, str]:
+        if self._collection_paths is None or refresh:
+            collections = self.list_collections()
+            by_key = {collection.key: collection for collection in collections}
+            self._collection_paths = {
+                collection_path(collection, by_key): collection.key
+                for collection in collections
+            }
+        return self._collection_paths
+
+    def _create_collection(self, name: str, parent_key: str | None) -> None:
+        body: dict[str, Any] = {"name": name}
+        if parent_key:
+            body["parentCollection"] = parent_key
+        response = self._request(
+            "POST",
+            f"{self.library_prefix}/collections",
+            json=[body],
+            headers={
+                **self._write_headers(),
+                # Creation has no object version, so it uses a write token.
+                "Zotero-Write-Token": secrets.token_hex(16),
+            },
+        )
+        if response.status_code >= 400:
+            raise ZoteroWriteError(
+                f"creating collection {name!r} failed with HTTP "
+                f"{response.status_code}: {_snippet(response)}"
+            )
+
+    def _patch_item(
+        self, item: ZoteroItem, body: dict[str, Any], what: str
+    ) -> httpx.Response:
+        response = self._request(
+            "PATCH",
+            f"{self.library_prefix}/items/{item.key}",
+            json=body,
+            headers={
+                **self._write_headers(),
+                "If-Unmodified-Since-Version": str(item.version),
+            },
+        )
         if response.status_code == 401:
             # Single-use or revoked key: authorize again and retry exactly once.
             self._write_key = None
-            self.authorize_writes()
-            assert self._write_key is not None
-            response = self._patch_tags(item, merged, self._write_key, server_id)
+            response = self._request(
+                "PATCH",
+                f"{self.library_prefix}/items/{item.key}",
+                json=body,
+                headers={
+                    **self._write_headers(),
+                    "If-Unmodified-Since-Version": str(item.version),
+                },
+            )
 
         if response.status_code == 412:
             raise ZoteroWriteError(
@@ -438,30 +541,23 @@ class ZoteroClient:
             )
         if response.status_code == 401:
             raise ZoteroWriteError(
-                f"Zotero still rejected the write to {item.key} after "
+                f"Zotero still rejected the {what} write to {item.key} after "
                 "re-authorizing; check Settings -> Advanced -> "
                 "'Clear Write Authorizations' and retry"
             )
         if response.status_code >= 400:
             raise ZoteroWriteError(
-                f"writing tags to {item.key} failed with HTTP "
+                f"writing {what} to {item.key} failed with HTTP "
                 f"{response.status_code}: {_snippet(response)}"
             )
-        return merged
+        return response
 
-    def _patch_tags(
-        self, item: ZoteroItem, tags: list[str], key: str, server_id: str
-    ) -> httpx.Response:
-        return self._request(
-            "PATCH",
-            f"{self.library_prefix}/items/{item.key}",
-            json={"tags": [{"tag": tag} for tag in tags]},
-            headers={
-                "Zotero-API-Key": key,
-                "Zotero-Server-ID": server_id,
-                "If-Unmodified-Since-Version": str(item.version),
-            },
-        )
+    def _write_headers(self) -> dict[str, str]:
+        server_id = self._require_server_id()
+        if self._write_key is None:
+            self.authorize_writes()
+        assert self._write_key is not None  # set by authorize_writes
+        return {"Zotero-API-Key": self._write_key, "Zotero-Server-ID": server_id}
 
     def _require_server_id(self) -> str:
         self._probe_instance()

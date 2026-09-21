@@ -1,6 +1,6 @@
 # Zotero collection 路由设计（草案）
 
-状态：**草案，尚未实现**。本文只描述设计，不改变任何行为。
+状态：**已实现**（`jevero route`）。本文记录最终设计；实现见 `src/jevero/routing.py`。
 相关代码：`src/jevero/policy.py`（产出标签）、`src/jevero/zotero.py`（读写）、`config.yaml`（映射）。
 
 对应 AGENTS.md 的 "Prefer tags before collection mutation"：collection 自动化要在分类质量被验证之后才加。目前只在 1 篇真实论文上验证过，所以本设计默认**关闭**。
@@ -62,71 +62,37 @@
 
 ---
 
-## 4. 映射配置（草案）
+## 4. 配置（最终形态）
+
+按 tag 直接路由，不再需要手写映射表：**标签名就是目录名**。
 
 ```yaml
 collections:
-  # 总开关。AGENTS 要求分类质量先被验证，所以默认关闭。
-  enabled: false
-
-  # add-only：绝不删除不是本次加进去的成员。prune 打开后只清理"被管理的
-  # collection"里的陈旧成员（见 §6）。
-  prune: false
-
-  # 把 inbox 变成真正的工作队列：路由后把论文移出 inbox。
-  # 默认关闭，因为这是对用户既有组织的破坏性改动。
+  topics_parent: "02 Topics"      # topic/<name> -> 02 Topics/<name>
+  roles_parent: "03 Roles"        # role/<name>  -> 03 Roles/<name>
+  review_collection: "04 Review"  # 所有 agent/review* 进同一个队列
+  route_roles: true
   remove_from_inbox: false
-
-  # 每个维度独立开关。
-  route:
-    topics: true
-    roles: false     # role 是facet（一篇可能 core+method+review），标签过滤比目录更合适
-    review: true
-
-  # 标签 -> 目标 collection。值可以是 8 位 key，也可以是名字或 "父/子" 路径；
-  # 启动时解析一次，check 会打印解析结果。key 在改名后依然有效。
-  routes:
-    topic/loop-integrals:    YRM8M87H          # 02 Topics/Physics
-    topic/amplitudes:        YRM8M87H          # 02 Topics/Physics
-    topic/perturbative-qcd:  YRM8M87H          # 02 Topics/Physics
-    topic/collider-phenomenology: YRM8M87H     # 02 Topics/Physics
-    topic/nrqcd:             VIW97AJZ          # 02 Topics
-    topic/quarkonium:        VIW97AJZ
-    topic/pnrqcd:            VIW97AJZ
-    topic/scet:              VIW97AJZ
-    topic/heavy-flavor:      VIW97AJZ
-    topic/fragmentation:     VIW97AJZ
-    topic/energy-correlator: "02 Topics/Math"
-    topic/experiment:        "02 Topics/Physics"
-
-  review:
-    # 所有 agent/review* 论文进这个队列（单队列，推荐）
-    collection: "04 Review"
-    # true = 每个 reason 一个 collection（agent/review/<reason> -> routes 里查）
-    per_reason: false
-
-  # 映射里没有的 collection 是否自动创建（放在这些父 collection 下）。
-  # 第一版建议关闭：只用已存在的目标，少一条写路径。
-  auto_create: false
-  parents:
-    topic: "02 Topics"
-    role: "03 Roles"
-    review: "04 Review"
 ```
-
-字段语义小结：
 
 | 字段 | 默认 | 作用 |
 |---|---|---|
-| `enabled` | `false` | 总开关，未验证前不动 collection |
-| `prune` | `false` | 是否清理陈旧成员（仅限受管 collection） |
-| `remove_from_inbox` | `false` | 是否把已路由论文移出 inbox |
-| `route.topics/roles/review` | `true/false/true` | 各维度开关 |
-| `routes` | `{}` | 显式映射，多对一允许 |
-| `review.collection` / `per_reason` | 单队列 | review 队列形态 |
-| `auto_create` / `parents` | `false` | 是否自动建 collection |
+| `topics_parent` | `02 Topics` | `topic/<name>` 的目标父目录 |
+| `roles_parent` | `03 Roles` | `role/<name>` 的目标父目录 |
+| `review_collection` | `04 Review` | 所有 `agent/review*` 的单队列；留空则不作队列 |
+| `route_roles` | `true` | 是否给 role 建目录（关掉就只用标签） |
+| `remove_from_inbox` | `false` | 路由后是否把论文移出 inbox |
 
----
+要点：
+
+- **标签名 = 目录名**，所以"粗桶还是细目录"这个问题消失了：`topic/loop-integrals` 就是
+  `02 Topics/loop-integrals`。已有的粗桶（`02 Topics/Physics`）不再被使用，可以自行删除或改名。
+- **自动创建**：缺失的父目录和子目录都会创建（`02 Topics` → `02 Topics/loop-integrals`），
+  子目录挂在正确的父目录下。
+- **review 单队列**：四个 reason 都进 `04 Review`——"需要人看"这件事是一样的；
+  标签仍然区分 reason，所以队列内部可以按标签过滤。
+- **role 目录默认开启**（最初需求包含 role），`route_roles: false` 一行即可关闭。
+- 没有 `enabled` 开关、没有 `prune`、没有 `--yes`：命令本身是显式的，且默认 dry-run。
 
 ## 5. 动作语义（确定性）
 
@@ -222,31 +188,35 @@ jevero route --apply              # 落地
 
 ---
 
-## 9. 分期实施
+## 9. 实施状态
 
-| 阶段 | 内容 | 是否改动 Zotero |
-|---|---|---|
-| P0 | `merge_collections()` 纯函数 + 映射解析与校验 + `check` 报告解析结果 + 测试 | 否 |
-| P1 | `jevero route --dry-run`：打印"当前成员 → 计划成员"差集 | 否 |
-| P2 | `jevero route --apply`：只做 add-only 的 topic 路由 | **是** |
-| P3 | review 队列（单队列 / per_reason）+ 与 `process` 合并成一次 PATCH | **是** |
-| P4 | `prune`、`remove_from_inbox`、`auto_create`（各自默认关闭） | **是** |
-| P5 | role collection（若仍需要，见 §10） | **是** |
+| 内容 | 位置 |
+|---|---|
+| `target_paths()`：标签 → 目标路径（纯函数） | `routing.py` |
+| `merge_collections()`：保留非受管成员 | `zotero.py` |
+| `ensure_collection_path()`：解析 + 按需创建（运行内缓存） | `zotero.py` |
+| `apply_membership()`：PATCH `collections` 全量列表 | `zotero.py` |
+| `jevero route --dry-run / --apply` | `main.py` |
 
-P0–P1 完全无风险，可以立刻做。
+测试覆盖：标签→路径的各种组合、成员合并、创建与缓存、dry-run 零写入、
+未分类论文被跳过。
 
----
-
-## 10. 待决定的问题
-
-1. **inbox 要不要清空？** `remove_from_inbox: true` 会让 `00 Read NOW!!!` 变成真正的工作队列（处理完就移出）；`false` 则它永远是"所有处理过的论文"的副本。我倾向 **true**，但默认值先给 false，等你看过 dry-run 再决定。
-2. **role 要不要 collection？** role 是 facet（一篇可能同时 `core`+`method`），目录会因此重复且不稳。我倾向**先不做**，用标签过滤。你如果需要，`route.roles: true` 即可开启。
-3. **review 队列：一个还是按 reason 分？** 单队列（`04 Review`）最简单；按 reason 分（`04 Review/ambiguous`、`/taxonomy-gap`）更利于分别处理，但需要每类一个人工流程。你之前已经把标签拆成 state + reason，所以按 reason 分也有道理。
-4. **要不要 auto_create？** 关闭时只有已存在的目录能被写入，最安全；开启后新 topic 会自动建目录，但可能在 `02 Topics/` 下产生与现有粗桶命名风格不一致的新目录（`02 Topics/perturbative-qcd` vs `02 Topics/Physics`）。
-5. **`02 Topics/Physics` 这个粗桶怎么处理？** 上面草案把它作为 4 个 topic 的目标（多对一）。另一个选择是新建细目录（`02 Topics/Physics/<topic>`）保留你的粗桶层级——需要你定目录风格。
-6. **是否需要在写入前人工确认？** 例如 `route --apply` 打印差集并要求 `--yes`。对 34 篇不必要，对全库批量重跑有用。
+**未做**（也不打算做）：prune（清理陈旧成员）、按 reason 拆分队列、写前人工确认。
+需要时再加，都不影响现有数据结构。
 
 ---
+
+## 10. 已决定的取舍
+
+| 问题 | 决定 |
+|---|---|
+| 已有 collection 怎么办 | 不管也不改；按 tag 直接路由，旧粗桶可自行删除 |
+| 手写映射表 | 不要；标签名即目录名 |
+| topic 目录风格 | 按 tag，不用粗桶 |
+| role 要不要目录 | 要（`route_roles: true`），可一行关闭 |
+| review 队列 | 单队列 `04 Review` |
+| 自动创建 | 要 |
+| CLI | 简洁：`route` 默认 dry-run，`--apply` 才写 |
 
 ## 11. 与 AGENTS.md 的关系
 

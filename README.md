@@ -604,6 +604,31 @@ There is no `ZOTERO_API_KEY` or `ZOTERO_LIBRARY_ID`: the local API serves the
 locally logged-in user as library `0`. The zotero.org Web API client is archived
 in `archive/zotero_web_api.py` (see `archive/README.md`).
 
+### Filing papers into collections
+
+`jevero route` files each paper into collections based on the tags it already
+has. It never calls the classifier, so re-running it after changing the settings
+below costs nothing.
+
+```bash
+jevero route --dry-run     # show the plan (default)
+jevero route --apply       # create the collections and file the papers
+```
+
+```yaml
+collections:
+  topics_parent: "02 Topics"      # topic/<name> -> 02 Topics/<name>
+  roles_parent: "03 Roles"        # role/<name>  -> 03 Roles/<name>
+  review_collection: "04 Review"  # every agent/review* -> one queue
+  route_roles: true
+  remove_from_inbox: false        # true keeps the inbox a real work queue
+```
+
+Missing collections are created. `collections` is a complete list on write, so
+membership is merged rather than replaced: collections this tool knows nothing
+about are never dropped, and only the inbox is ever removed from. A paper in
+review is filed in its topic collection *and* the review queue.
+
 ### Writing tags: local API authorization
 
 Writes need **Zotero 10 or later**. Zotero 9 and earlier expose the local API

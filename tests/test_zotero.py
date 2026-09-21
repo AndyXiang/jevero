@@ -24,6 +24,7 @@ from jevero.zotero import (
     ZoteroNotFoundError,
     ZoteroReadError,
     ZoteroWriteError,
+    merge_collections,
     merge_tags,
     normalize_item,
 )
@@ -298,6 +299,7 @@ class LocalApi:
         authorize_status: int = 200,
         patch_status: int = 204,
         reject_first_patch_with_401: bool = False,
+        collections: list[dict] | None = None,
     ) -> None:
         self.server_id = server_id
         self.zotero_version = zotero_version
@@ -308,6 +310,8 @@ class LocalApi:
         self.authorize_calls = 0
         self.patch_headers: list[httpx.Headers] = []
         self.patch_bodies: list[dict] = []
+        self.collections: list[dict] = list(collections or [])
+        self.created: list[dict] = []
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -326,6 +330,18 @@ class LocalApi:
             return httpx.Response(
                 200, json={"key": f"local-key-{self.authorize_calls}", "remember": self.remember}
             )
+
+        if path == "/api/users/0/collections":
+            if request.method == "GET":
+                return httpx.Response(200, json=self.collections)
+            body = json.loads(request.content)[0]
+            self.created.append(body)
+            key = f"NEW{len(self.created):05d}"
+            data = {"key": key, "name": body["name"]}
+            if body.get("parentCollection"):
+                data["parentCollection"] = body["parentCollection"]
+            self.collections.append({"key": key, "data": data})
+            return httpx.Response(200, json={"successful": {"0": {"key": key}}})
 
         if request.method == "PATCH":
             self.patch_headers.append(request.headers)
@@ -514,3 +530,106 @@ def test_empty_actions_are_a_no_op_and_do_not_raise(zotero_item_payload: dict):
             "topic/quarkonium",
             "my own tag",
         ]
+
+
+# --------------------------------------------------------------------------- #
+# collection membership and creation
+# --------------------------------------------------------------------------- #
+
+
+def test_merge_collections_preserves_unmanaged_membership():
+    merged = merge_collections(
+        ["KRQJSKLH", "OTHER111"], add={"NEWKEY11"}, remove=set()
+    )
+
+    assert merged == ["KRQJSKLH", "OTHER111", "NEWKEY11"]
+
+
+def test_merge_collections_removes_only_what_was_asked():
+    merged = merge_collections(
+        ["KRQJSKLH", "OTHER111"], add={"NEWKEY11"}, remove={"KRQJSKLH"}
+    )
+
+    assert merged == ["OTHER111", "NEWKEY11"]
+
+
+def test_merge_collections_ignores_adding_something_being_removed():
+    assert merge_collections([], add={"XKEY1111"}, remove={"XKEY1111"}) == []
+
+
+def test_apply_membership_writes_the_complete_list(zotero_item_payload: dict):
+    api = LocalApi()
+    item = ZoteroItem(
+        key="ABCD2345",
+        version=417,
+        data={**zotero_item_payload["data"], "collections": ["KRQJSKLH"]},
+    )
+
+    with make_client(api.handler) as client:
+        merged = client.apply_membership(
+            item, add={"NEWKEY11", "NEWKEY22"}, remove=set()
+        )
+
+    assert merged == ["KRQJSKLH", "NEWKEY11", "NEWKEY22"]
+    assert api.patch_bodies == [{"collections": merged}]
+    assert api.patch_headers[0]["If-Unmodified-Since-Version"] == "417"
+
+
+def test_apply_membership_is_a_no_op_when_nothing_changes(zotero_item_payload: dict):
+    api = LocalApi()
+    item = ZoteroItem(
+        key="ABCD2345",
+        version=417,
+        data={**zotero_item_payload["data"], "collections": ["KRQJSKLH"]},
+    )
+
+    with make_client(api.handler) as client:
+        client.apply_membership(item, add={"KRQJSKLH"}, remove=set())
+
+    assert api.authorize_calls == 0
+    assert api.patch_headers == []
+
+
+def test_collection_lookup_does_not_create_anything():
+    api = LocalApi(
+        collections=[{"key": "TOPICS11", "data": {"name": "02 Topics"}}]
+    )
+
+    with make_client(api.handler) as client:
+        assert client.collection_key_for_path("02 Topics") == "TOPICS11"
+        assert client.collection_key_for_path("02 Topics/loop-integrals") is None
+
+    assert api.created == []
+
+
+def test_ensure_collection_path_creates_missing_parent_and_child():
+    api = LocalApi()
+
+    with make_client(api.handler) as client:
+        key = client.ensure_collection_path("02 Topics/loop-integrals")
+
+    assert [entry["name"] for entry in api.created] == ["02 Topics", "loop-integrals"]
+    assert api.created[1]["parentCollection"] == "NEW00001"
+    assert key == "NEW00002"
+
+
+def test_ensure_collection_path_reuses_what_exists():
+    api = LocalApi(collections=[{"key": "TOPICS11", "data": {"name": "02 Topics"}}])
+
+    with make_client(api.handler) as client:
+        key = client.ensure_collection_path("02 Topics/loop-integrals")
+
+    assert [entry["name"] for entry in api.created] == ["loop-integrals"]
+    assert api.created[0]["parentCollection"] == "TOPICS11"
+    assert key == "NEW00001"
+
+
+def test_ensure_collection_path_is_cached_within_a_run():
+    api = LocalApi()
+
+    with make_client(api.handler) as client:
+        first = client.ensure_collection_path("02 Topics/loop-integrals")
+        second = client.ensure_collection_path("02 Topics/loop-integrals")
+
+    assert first == second
+    assert len(api.created) == 2  # parent + child, created once

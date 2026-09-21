@@ -31,6 +31,7 @@ from .config import (
 )
 from .jev import JevClient, JevError, JevOutcome
 from .models import InputMode, PaperRecord, PolicyActions
+from .routing import target_paths
 from .policy import (
     STATE_ERROR,
     STATE_PROCESSED,
@@ -76,6 +77,13 @@ class RunSummary:
     skipped: int = 0
     failed: int = 0
     cost: float = 0.0
+
+
+@dataclass
+class RouteSummary:
+    routed: int = 0
+    skipped: int = 0
+    failed: int = 0
 
 
 @app.command()
@@ -188,6 +196,46 @@ def collections(
 
 
 @app.command()
+def route(
+    config_path: Path = typer.Option(
+        DEFAULT_CONFIG, "--config", "-c", help="Path to config.yaml."
+    ),
+    apply: bool = typer.Option(
+        False, "--apply", help="Write collection membership. Without it, nothing changes."
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Explicitly inspect only. This is the default."
+    ),
+    limit: int = typer.Option(0, "--limit", help="Stop after N papers (0 = no limit)."),
+) -> None:
+    """File papers into collections based on the tags they already have.
+
+    Never calls the classifier: this only reads tags and writes collection
+    membership, so re-running it after changing the collection settings is free.
+    """
+    if apply and dry_run:
+        raise typer.BadParameter("--apply and --dry-run are mutually exclusive")
+    mutate = apply
+    if not mutate:
+        typer.secho("[dry-run] no Zotero changes will be made", fg=typer.colors.YELLOW)
+
+    try:
+        config = load_config(config_path)
+        summary = _route(config, mutate=mutate, limit=limit or None)
+    except ConfigError as exc:
+        typer.secho(f"configuration error: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2) from exc
+    except (ZoteroError, JevError) as exc:
+        typer.secho(f"error: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2) from exc
+
+    typer.echo("")
+    typer.echo(f"{summary.routed} routed, {summary.skipped} unchanged, {summary.failed} failed")
+    if summary.failed:
+        raise typer.Exit(code=1)
+
+
+@app.command()
 def check(
     config_path: Path = typer.Option(
         DEFAULT_CONFIG, "--config", "-c", help="Path to config.yaml."
@@ -295,6 +343,85 @@ def _run(
                     item, config, zotero=zotero, jev=jev, mutate=mutate, summary=summary
                 )
     return summary
+
+
+def _route(config: Config, *, mutate: bool, limit: int | None) -> RouteSummary:
+    """File each inbox paper into the collections its tags point at."""
+    summary = RouteSummary()
+    settings = config.collections
+    with _zotero_client(config) as zotero:
+        if mutate:
+            zotero.ensure_writes_available()
+        collection_key = zotero.find_collection_key(config.zotero.inbox_collection)
+        typer.echo(
+            f"Inbox {config.zotero.inbox_collection!r} ({collection_key}) "
+            f"via the Zotero local API"
+        )
+
+        for item in zotero.iter_papers(collection_key=collection_key, limit=limit):
+            paths = target_paths(item.tags, config)
+            if not paths:
+                summary.skipped += 1
+                continue
+
+            current = {str(key) for key in (item.data.get("collections") or [])}
+            try:
+                resolved = _resolve_targets(zotero, paths, mutate=mutate)
+            except ZoteroError as exc:
+                typer.secho(f"[{item.key}] routing failed: {exc}", fg=typer.colors.RED)
+                summary.failed += 1
+                continue
+
+            add = {key for key in resolved.values() if key}
+            missing = [path for path, key in resolved.items() if key is None]
+            remove = (
+                {collection_key}
+                if settings.remove_from_inbox and collection_key not in add
+                else set()
+            )
+
+            if not missing and add <= current and not remove & current:
+                summary.skipped += 1
+                continue
+
+            _render_route(item, resolved, remove, mutate=mutate)
+            if mutate:
+                try:
+                    zotero.apply_membership(item, add=add, remove=remove)
+                except ZoteroError as exc:
+                    typer.secho(
+                        f"[{item.key}] routing failed: {exc}", fg=typer.colors.RED
+                    )
+                    summary.failed += 1
+                    continue
+            summary.routed += 1
+
+    return summary
+
+
+def _resolve_targets(
+    zotero: ZoteroClient, paths: list[str], *, mutate: bool
+) -> dict[str, str | None]:
+    """Map target paths to keys, creating them only when we are writing."""
+    if mutate:
+        return {path: zotero.ensure_collection_path(path) for path in paths}
+    return {path: zotero.collection_key_for_path(path) for path in paths}
+
+
+def _render_route(
+    item: ZoteroItem,
+    resolved: dict[str, str | None],
+    remove: set[str],
+    *,
+    mutate: bool,
+) -> None:
+    title = str(item.data.get("title") or "").strip()
+    typer.secho(f"\n[{item.key}] {title}", bold=True)
+    for path, key in resolved.items():
+        suffix = "" if key else "   (does not exist yet)"
+        typer.secho(f"  + {path}{suffix}", fg=typer.colors.GREEN)
+    if remove:
+        typer.secho("  - inbox", fg=typer.colors.RED)
 
 
 def _process_one(
