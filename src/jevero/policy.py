@@ -39,8 +39,9 @@ STATE_ERROR = "agent/error"
 #: Why a paper needs a human. Every reason maps to a different next action,
 #: which is the whole point of naming them separately.
 #:
-#: ``ambiguous``    a judgement landed in the review band -> calibrate a
-#:                  threshold or rewrite a description in config.yaml;
+#: ``ambiguous``    a whole dimension stayed undecided: nothing cleared its
+#:                  apply threshold, yet its best guess was plausible ->
+#:                  calibrate a threshold or rewrite a description;
 #: ``coverage``     the coverage judgement itself is unconvincing (``covered``
 #:                  is low) -> read the paper and decide what it is;
 #: ``taxonomy-gap`` in scope, but no configured topic fits -> decide whether
@@ -163,10 +164,16 @@ def _above(
 
 
 def _has_ambiguous(result: ClassificationResult, config: Config) -> bool:
-    """True when any configured name sits in the review band.
+    """True when a dimension could not be decided at all.
 
-    The review band is ``[thresholds.review, apply_threshold)`` per dimension:
-    plausible enough to matter, not confident enough to act on.
+    A dimension that produced at least one applied tag counts as decided: a
+    second, weaker candidate in the review band ("maybe also this") is not worth
+    interrupting a human for. A dimension with nothing applied whose best
+    candidate is merely plausible is genuinely undecided, and gets reported.
+
+    Without that distinction a single weak candidate anywhere would flag the
+    paper, and with 12 topics plus 6 roles there is almost always one in the
+    band.
     """
     thresholds = config.thresholds
     dimensions = (
@@ -174,9 +181,10 @@ def _has_ambiguous(result: ClassificationResult, config: Config) -> bool:
         (result.roles, config.roles, thresholds.role_apply),
     )
     for probabilities, configured, apply_threshold in dimensions:
-        for name in configured:
-            if thresholds.review <= probabilities[name] < apply_threshold:
-                return True
+        if any(probabilities[name] >= apply_threshold for name in configured):
+            continue  # this dimension is decided
+        if any(probabilities[name] >= thresholds.review for name in configured):
+            return True
     return False
 
 

@@ -113,6 +113,28 @@ def test_ambiguous_classification_is_reported(config, result_factory):
     assert "topic/nrqcd" not in actions.add_tags
 
 
+def test_a_decided_dimension_does_not_report_its_weaker_candidates(
+    config, result_factory
+):
+    """`loop-integrals` 0.89 already decided the topics; a second candidate
+    sitting at 0.61 is "maybe also this", not a reason to interrupt a human."""
+    result = result_factory(topics={"quarkonium": 0.97, "nrqcd": 0.61})
+    actions = plan(result, config)
+
+    assert "topic/quarkonium" in actions.add_tags
+    assert REASON_AMBIGUOUS not in actions.add_tags
+    assert STATE_REVIEW not in actions.add_tags
+
+
+def test_an_undecided_dimension_is_still_reported(config, result_factory):
+    """Roles resolved nothing here, so the paper is genuinely undecided."""
+    result = result_factory(topics={"quarkonium": 0.97}, roles={"method": 0.79})
+    actions = plan(result, config)
+
+    assert "topic/quarkonium" in actions.add_tags
+    assert REASON_AMBIGUOUS in actions.add_tags
+
+
 def test_unconvincing_covered_is_reported(config, result_factory):
     """Nothing applied, and `covered` says the taxonomy does not fit either."""
     result = result_factory(

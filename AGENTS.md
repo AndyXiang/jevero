@@ -378,7 +378,7 @@ coverage.irrelevant >= irrelevant
 coverage.covered < covered_apply
     → add agent/review/coverage
 
-probability of any judgement in [review, apply)
+a dimension with nothing applied whose best judgement is in [review, apply)
     → add agent/review/ambiguous
 
 successful processing

@@ -733,18 +733,23 @@ Use dry-run on a representative validation set before enabling automatic writes.
 
 Classification should be conservative.
 
-A useful starting rule is:
+A useful starting rule is, per dimension (topics, roles):
 
 ```text
 p >= 0.85
     automatically apply
 
-0.55 <= p < 0.85
-    ambiguous; consider agent/review
+nothing applied, and the best candidate in [0.55, 0.85)
+    the dimension is undecided; add agent/review/ambiguous
 
-p < 0.55
+nothing applied, and no candidate >= 0.55
     ignore
 ```
+
+A dimension that already produced an applied tag counts as decided, so a
+second, weaker candidate in the band ("maybe also this") is not reported. With
+12 topics and 6 roles, flagging on any in-band value means almost every paper
+is flagged.
 
 Coverage uses separate thresholds:
 
