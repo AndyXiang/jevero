@@ -1,26 +1,51 @@
-"""All Zotero access lives here: the desktop local API only.
+"""ARCHIVED - zotero.org Web API client (verbatim snapshot).
 
-Requests go to the Zotero desktop client's local implementation of the Web API
-on ``localhost:23119`` under ``/api/``. Zotero's SQLite database is never opened
-or modified.
+This is the Web API implementation as it was before the project switched to
+the Zotero desktop local API. It is **not imported, not installed, and not
+covered by the test suite**; it is kept as a working reference so that Web API
+support can be restored deliberately instead of being rewritten from memory.
 
-Why local only, for now:
+Snapshot of: src/jevero/zotero.py
+Removed by:  the commit that made the active client local-only.
 
-* reads need no credentials and no network, so ``--dry-run`` works offline and
-  is never rate limited;
-* writes need a local API key that Zotero grants at runtime through a
-  confirmation dialog (``POST /api/local/authorize``). That flow is not
-  implemented yet, so ``supports_write`` is ``False`` and ``--apply`` fails
-  fast instead of half-working.
+What it contains that the active client does not:
 
-The zotero.org Web API client is archived in ``archive/zotero_web_api.py``.
+* ``WEB_BASE_URL`` and the ``backend`` switch (``web`` | ``local``);
+* ``library_type`` / ``library_id`` handling, i.e. ``/users/<id>`` and
+  ``/groups/<id>`` prefixes;
+* API-key authentication via ``Authorization: Bearer`` for the Web API;
+* the ``apply_actions`` PATCH path wired to a Web API key.
+
+What restoring it requires (see archive/README.md for the full list):
+
+1. re-add ``backend``/``library_type``/``library_id`` to ``ZoteroConfig``;
+2. re-add the Web API credentials (``ZOTERO_API_KEY``, ``ZOTERO_LIBRARY_ID``)
+   and their ``config.py`` helpers;
+3. return the ``apply_actions`` PATCH branch to the active client;
+4. restore the corresponding tests from git history.
+
+Verified facts recorded at archive time (checked 2026-05):
+
+* ``GET https://api.zotero.org/...`` requires an API key for non-public
+  libraries, and ``Authorization: Bearer <key>`` is an accepted form.
+* Authentication failures return ``403 Forbidden``, not 401.
+* ``PATCH /users/<id>/items/<key>`` with ``If-Unmodified-Since-Version`` is the
+  tag-write path; ``tags`` is a complete list.
+* Clients must handle the ``Backoff`` response header and ``429 Retry-After``
+  rate limiting; the snapshot below does **not** do so.
+"""
+
+"""All Zotero access lives here.
+
+Supported surface is the Zotero Web API v3 (or, read-only, the desktop local
+API on port 23119). Zotero's SQLite database is never opened or modified.
 
 Two details drive the shape of this module:
 
-* the local API must be enabled in Zotero's preferences, otherwise every
-  request returns ``403 Forbidden``; and
-* ``tags`` is a *complete list* on write, not a patch, so unrelated existing
-  tags must be merged back in and never dropped.
+* Items carry a ``version``. Writes must send ``If-Unmodified-Since-Version`` so
+  a concurrent edit is rejected with HTTP 412 instead of being overwritten.
+* ``tags`` is a *complete list* on write, not a patch. Unrelated existing tags
+  must therefore be merged back in, never dropped.
 """
 
 from __future__ import annotations
@@ -35,10 +60,10 @@ import httpx
 from .http import create_client
 from .models import PaperRecord, PolicyActions
 
+WEB_BASE_URL = "https://api.zotero.org"
 LOCAL_BASE_URL = "http://127.0.0.1:23119/api"
-#: The local API serves the locally logged-in user as library ``0``.
-LOCAL_USER_ID = "0"
-#: Only API version 3 exists locally, and only one version at a time.
+#: The local API always serves the logged-in user as library ``0``.
+LOCAL_LIBRARY_ID = "0"
 ZOTERO_API_VERSION = "3"
 PAGE_SIZE = 100
 
@@ -48,11 +73,6 @@ _NON_PAPER_TYPES = frozenset({"attachment", "note", "annotation"})
 _YEAR_PATTERN = re.compile(r"(?<!\d)(1[5-9]\d{2}|20\d{2})(?!\d)")
 _ARXIV_PATTERN = re.compile(
     r"arxiv[:\s/]*(?P<id>[a-z.-]+/\d{7}|\d{4}\.\d{4,5})", re.IGNORECASE
-)
-
-_ENABLE_LOCAL_API_HINT = (
-    "enable it in Zotero: Settings -> Advanced -> "
-    "'Allow other applications on this computer to communicate with Zotero'"
 )
 
 
@@ -65,15 +85,11 @@ class ZoteroReadError(ZoteroError):
 
 
 class ZoteroWriteError(ZoteroError):
-    """A write failed, was refused, or is not available yet."""
+    """A write failed or was refused."""
 
 
 class ZoteroNotFoundError(ZoteroReadError):
     """A requested collection or item does not exist."""
-
-
-class ZoteroLocalApiDisabledError(ZoteroReadError):
-    """The local API is switched off in Zotero's preferences."""
 
 
 @dataclass(frozen=True)
@@ -131,9 +147,7 @@ def merge_tags(existing: list[str], actions: PolicyActions) -> list[str]:
     """Apply actions to a tag list, preserving unrelated tags.
 
     Zotero replaces the whole tag array on write, so this must always be the
-    full list that should end up on the item. It stays here, and unit tested,
-    even while writes are unavailable: it is the part that must not be wrong
-    once writes are enabled.
+    full list that should end up on the item.
     """
     tags = {tag for tag in existing if tag}
     tags |= {tag for tag in actions.add_tags if tag}
@@ -142,16 +156,33 @@ def merge_tags(existing: list[str], actions: PolicyActions) -> list[str]:
 
 
 class ZoteroClient:
-    """Read the local Zotero library through the desktop local API."""
+    """Read and write a Zotero library through the supported HTTP API."""
 
     def __init__(
         self,
         *,
-        base_url: str = LOCAL_BASE_URL,
+        library_type: str = "user",
+        library_id: str,
+        api_key: str | None = None,
+        backend: str = "web",
+        base_url: str | None = None,
         timeout_seconds: float = 30.0,
         http_client: httpx.Client | None = None,
     ) -> None:
-        self.base_url = base_url.rstrip("/")
+        if library_type not in {"user", "group"}:
+            raise ZoteroError(f"unsupported library_type {library_type!r}")
+        if backend not in {"web", "local"}:
+            raise ZoteroError(f"unsupported backend {backend!r}")
+        if backend == "web" and not library_id:
+            raise ZoteroError(
+                "no Zotero library ID; set ZOTERO_LIBRARY_ID or zotero.library_id"
+            )
+
+        self.backend = backend
+        self.library_type = library_type
+        self.library_id = library_id or LOCAL_LIBRARY_ID
+        self._api_key = api_key
+        self._base_url = (base_url or _default_base_url(backend)).rstrip("/")
         self._http = http_client or create_client(timeout_seconds)
         self._owns_client = http_client is None
 
@@ -167,17 +198,16 @@ class ZoteroClient:
 
     @property
     def supports_write(self) -> bool:
-        """False until the runtime local-key authorization flow is implemented.
+        """Writes need an API key on either backend.
 
-        Local writes (Zotero 10+) require a key granted on this machine through
-        a confirmation dialog, plus a ``Zotero-Server-ID`` header. Until that
-        exists, the CLI refuses ``--apply`` rather than failing per paper.
+        The desktop local API is read-only before Zotero 10; from Zotero 10 the
+        same write methods exist behind a locally granted key.
         """
-        return False
+        return self._api_key is not None
 
     @property
     def library_prefix(self) -> str:
-        return f"/users/{LOCAL_USER_ID}"
+        return f"/{self.library_type}s/{self.library_id}"
 
     def find_collection_key(self, name: str) -> str:
         """Resolve a collection name such as ``00 Inbox`` to its key."""
@@ -218,17 +248,37 @@ class ZoteroClient:
     def apply_actions(self, item: ZoteroItem, actions: PolicyActions) -> list[str]:
         """Write tags for one item, preserving every unrelated existing tag.
 
-        Not available yet: the local API needs a runtime-granted key. Raises
-        ``ZoteroWriteError`` with the reason. The CLI refuses ``--apply`` before
-        reaching this point.
+        Returns the resulting tag list. Raises ``ZoteroWriteError`` on refusal,
+        including the HTTP 412 raised when the item changed since it was read.
         """
         if actions.is_empty:
             return item.tags
-        raise ZoteroWriteError(
-            "writing tags over the local API needs a key that Zotero grants at "
-            "runtime (POST /api/local/authorize), which is not implemented yet; "
-            "use --dry-run, or restore the archived Web API client"
+        if not self.supports_write:
+            raise ZoteroWriteError(
+                "no Zotero API key; writes need ZOTERO_API_KEY "
+                "(use --dry-run to inspect without one)"
+            )
+
+        merged = merge_tags(item.tags, actions)
+        if merged == sorted(item.tags):
+            return item.tags
+
+        response = self._request(
+            "PATCH",
+            f"{self.library_prefix}/items/{item.key}",
+            json={"tags": [{"tag": tag} for tag in merged]},
+            headers={"If-Unmodified-Since-Version": str(item.version)},
         )
+        if response.status_code == 412:
+            raise ZoteroWriteError(
+                f"item {item.key} changed since it was read; re-run to retry"
+            )
+        if response.status_code >= 400:
+            raise ZoteroWriteError(
+                f"writing tags to {item.key} failed with HTTP "
+                f"{response.status_code}: {_snippet(response)}"
+            )
+        return merged
 
     def _iter_pages(self, path: str) -> Iterator[dict[str, Any]]:
         start = 0
@@ -247,13 +297,10 @@ class ZoteroClient:
                 return
             start += PAGE_SIZE
 
-    def _get_json(self, path: str, *, params: dict[str, Any] | None = None) -> Any:
+    def _get_json(
+        self, path: str, *, params: dict[str, Any] | None = None
+    ) -> Any:
         response = self._request("GET", path, params=params)
-        if response.status_code == 403:
-            raise ZoteroLocalApiDisabledError(
-                f"Zotero refused {path} with 403 Forbidden; the local API is "
-                f"probably disabled. To {_ENABLE_LOCAL_API_HINT}."
-            )
         if response.status_code == 404:
             raise ZoteroNotFoundError(f"Zotero returned 404 for {path}")
         if response.status_code >= 400:
@@ -272,19 +319,30 @@ class ZoteroClient:
         path: str,
         *,
         params: dict[str, Any] | None = None,
+        json: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
     ) -> httpx.Response:
+        request_headers = {"Zotero-API-Version": ZOTERO_API_VERSION}
+        if self._api_key:
+            request_headers["Authorization"] = f"Bearer {self._api_key}"
+        if headers:
+            request_headers.update(headers)
         try:
             return self._http.request(
                 method,
-                self.base_url + path,
+                self._base_url + path,
                 params=params,
-                headers={"Zotero-API-Version": ZOTERO_API_VERSION},
+                json=json,
+                headers=request_headers,
             )
         except httpx.HTTPError as exc:
             raise ZoteroReadError(
-                f"could not reach the Zotero local API at {self.base_url} "
-                f"(is the Zotero desktop app running?): {exc}"
+                f"could not reach Zotero at {self._base_url}: {exc}"
             ) from exc
+
+
+def _default_base_url(backend: str) -> str:
+    return LOCAL_BASE_URL if backend == "local" else WEB_BASE_URL
 
 
 def _to_item(raw: dict[str, Any]) -> ZoteroItem | None:

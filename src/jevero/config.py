@@ -102,13 +102,16 @@ class ModelConfig(BaseModel):
 
 
 class ZoteroConfig(BaseModel):
-    """Which Zotero library to read, and whether writes are possible."""
+    """Where the Zotero desktop local API is, and which collection to read.
+
+    Only the desktop local API is used. It serves the locally logged-in user,
+    so there is no library type or library ID to configure. Web API support is
+    archived in ``archive/zotero_web_api.py``.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    backend: Literal["web", "local"] = "web"
-    library_type: Literal["user", "group"] = "user"
-    library_id: str = ""
+    base_url: str = "http://127.0.0.1:23119/api"
     inbox_collection: str = "00 Inbox"
     timeout_seconds: float = Field(default=30.0, gt=0)
 
@@ -304,11 +307,3 @@ def openrouter_api_key() -> str:
     return _require_env("OPENROUTER_API_KEY")
 
 
-def zotero_api_key() -> str | None:
-    """Zotero key. Required for the Web API, optional for local read-only use."""
-    return _optional_env("ZOTERO_API_KEY")
-
-
-def zotero_library_id(config: Config) -> str:
-    """Library ID from the environment, falling back to ``config.yaml``."""
-    return _optional_env("ZOTERO_LIBRARY_ID") or config.zotero.library_id

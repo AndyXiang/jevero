@@ -1,11 +1,14 @@
-"""End-to-end pipeline tests: dry-run must not mutate anything."""
+"""End-to-end pipeline tests: dry-run must not mutate anything.
+
+The Zotero side is a fake implementing the same small surface ``main`` uses.
+The real local client cannot write yet, so the apply path is exercised against
+the fake while the client's own refusal is tested in ``test_zotero.py``.
+"""
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
-import httpx
 import pytest
 from typer.testing import CliRunner
 
@@ -13,10 +16,9 @@ from jevero import main as main_module
 from jevero.config import Config
 from jevero.jev import JevOutcome, JevTransportError
 from jevero.main import app
-from jevero.models import Usage
-from jevero.zotero import ZoteroClient, ZoteroError
+from jevero.models import PolicyActions, Usage
+from jevero.zotero import ZoteroClient, ZoteroError, ZoteroItem
 
-LIBRARY_ID = "123456"
 COLLECTION_KEY = "INBOX123"
 
 ITEM = {
@@ -38,6 +40,12 @@ ITEM_WITHOUT_ABSTRACT = {
     "key": "ABCD2345",
     "version": 417,
     "data": {**ITEM["data"], "abstractNote": ""},
+}
+
+ITEM_ALREADY_PROCESSED = {
+    "key": "ABCD2345",
+    "version": 418,
+    "data": {**ITEM["data"], "tags": [{"tag": "agent/processed"}]},
 }
 
 
@@ -64,54 +72,59 @@ class FakeJevClient:
         return None
 
 
-class RecordingZotero:
-    """A real ZoteroClient over a mock transport, recording every request."""
+class FakeZotero:
+    """Records the actions ``main`` would write, without writing anything."""
 
-    def __init__(self, item: dict):
-        self.requests: list[httpx.Request] = []
+    def __init__(self, item: dict, *, supports_write: bool = True):
         self._item = item
-
-    def _handler(self, request: httpx.Request) -> httpx.Response:
-        self.requests.append(request)
-        path = request.url.path
-        if path == f"/users/{LIBRARY_ID}/collections":
-            return httpx.Response(
-                200, json=[{"key": COLLECTION_KEY, "data": {"name": "00 Inbox"}}]
-            )
-        if path == f"/users/{LIBRARY_ID}/collections/{COLLECTION_KEY}/items/top":
-            return httpx.Response(200, json=[self._item])
-        if path == f"/users/{LIBRARY_ID}/items/{self._item['key']}":
-            return httpx.Response(200, json=self._item)
-        if request.method == "PATCH":
-            return httpx.Response(204)
-        return httpx.Response(404, text="unexpected path")
+        self._supports_write = supports_write
+        self.applied: list[PolicyActions] = []
+        self.read_paths: list[str] = []
 
     @property
-    def writes(self) -> list[httpx.Request]:
-        return [request for request in self.requests if request.method == "PATCH"]
+    def supports_write(self) -> bool:
+        return self._supports_write
 
-    def client(self) -> ZoteroClient:
-        return ZoteroClient(
-            library_type="user",
-            library_id=LIBRARY_ID,
-            api_key="zotero-key",
-            backend="web",
-            http_client=httpx.Client(transport=httpx.MockTransport(self._handler)),
+    @property
+    def item(self) -> ZoteroItem:
+        return ZoteroItem(
+            key=self._item["key"], version=self._item["version"], data=self._item["data"]
         )
+
+    def find_collection_key(self, name: str) -> str:
+        self.read_paths.append(f"collections:{name}")
+        return COLLECTION_KEY
+
+    def iter_papers(self, *, collection_key=None, limit=None):
+        self.read_paths.append(f"items:{collection_key}")
+        yield self.item
+
+    def get_item(self, key: str) -> ZoteroItem:
+        self.read_paths.append(f"item:{key}")
+        return self.item
+
+    def apply_actions(self, item: ZoteroItem, actions: PolicyActions) -> list[str]:
+        self.applied.append(actions)
+        return sorted(set(item.tags) | actions.add_tags)
+
+    def __enter__(self) -> FakeZotero:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
 
 
 @pytest.fixture
 def confidence(config: Config) -> JevOutcome:
-    from jevero.jev import build_questions, question_key
+    from jevero.jev import build_questions, parse_answers, question_key
 
-    answers = {
-        key: {"type": "noul", "noul": 0.05} for key in build_questions(config)
-    }
+    answers = {key: {"type": "noul", "noul": 0.05} for key in build_questions(config)}
     answers[question_key("topic", "quarkonium")] = {"type": "noul", "noul": 0.96}
     answers[question_key("role", "core")] = {"type": "noul", "noul": 0.88}
     answers[question_key("coverage", "covered")] = {"type": "noul", "noul": 0.95}
-
-    from jevero.jev import parse_answers
 
     return JevOutcome(
         result=parse_answers(answers, config),
@@ -122,47 +135,58 @@ def confidence(config: Config) -> JevOutcome:
     )
 
 
-def wire(monkeypatch, config: Config, zotero: RecordingZotero, jev: FakeJevClient) -> None:
-    monkeypatch.setattr(main_module, "_zotero_client", lambda _config: zotero.client())
+def wire(monkeypatch, zotero: FakeZotero, jev: FakeJevClient) -> None:
+    monkeypatch.setattr(main_module, "_zotero_client", lambda _config: zotero)
     monkeypatch.setattr(main_module, "_jev_client", lambda _config: jev)
 
 
 def test_dry_run_performs_no_mutations(
-    monkeypatch, config: Config, config_path: Path, confidence: JevOutcome
+    monkeypatch, config_path: Path, confidence: JevOutcome
 ):
-    zotero = RecordingZotero(ITEM)
-    wire(monkeypatch, config, zotero, FakeJevClient(outcome=confidence))
+    zotero = FakeZotero(ITEM)
+    wire(monkeypatch, zotero, FakeJevClient(outcome=confidence))
 
     result = CliRunner().invoke(
         app, ["process", "--config", str(config_path), "--dry-run"]
     )
 
     assert result.exit_code == 0, result.output
-    assert zotero.writes == []
+    assert zotero.applied == []
     assert "topic/quarkonium" in result.output
     assert "APPLY" in result.output
     assert "no Zotero changes will be made" in result.output
 
 
 def test_apply_writes_only_policy_tags(
-    monkeypatch, config: Config, config_path: Path, confidence: JevOutcome
+    monkeypatch, config_path: Path, confidence: JevOutcome
 ):
-    zotero = RecordingZotero(ITEM)
-    wire(monkeypatch, config, zotero, FakeJevClient(outcome=confidence))
+    zotero = FakeZotero(ITEM)
+    wire(monkeypatch, zotero, FakeJevClient(outcome=confidence))
 
     result = CliRunner().invoke(app, ["process", "--config", str(config_path), "--apply"])
 
     assert result.exit_code == 0, result.output
-    assert len(zotero.writes) == 1
-    body = json.loads(zotero.writes[0].content)
-    tags = [entry["tag"] for entry in body["tags"]]
-    assert tags == [
+    assert len(zotero.applied) == 1
+    assert zotero.applied[0].add_tags == {
         "agent/processed",
-        "my own tag",
         "role/core",
-        "to-read",
         "topic/quarkonium",
-    ]
+    }
+    assert zotero.applied[0].remove_tags == set()
+
+
+def test_apply_fails_fast_when_writes_are_unavailable(
+    monkeypatch, config_path: Path, confidence: JevOutcome
+):
+    """The local client cannot authorize writes yet, so --apply must refuse."""
+    zotero = FakeZotero(ITEM, supports_write=False)
+    wire(monkeypatch, zotero, FakeJevClient(outcome=confidence))
+
+    result = CliRunner().invoke(app, ["process", "--config", str(config_path), "--apply"])
+
+    assert result.exit_code == 2
+    assert "cannot write" in result.output
+    assert zotero.applied == []
 
 
 def test_apply_and_dry_run_together_are_refused(config_path: Path):
@@ -174,60 +198,67 @@ def test_apply_and_dry_run_together_are_refused(config_path: Path):
 
 
 def test_missing_abstract_is_skipped_and_flagged_not_processed(
-    monkeypatch, config: Config, config_path: Path, confidence: JevOutcome
+    monkeypatch, config_path: Path, confidence: JevOutcome
 ):
-    zotero = RecordingZotero(ITEM_WITHOUT_ABSTRACT)
-    wire(monkeypatch, config, zotero, FakeJevClient(outcome=confidence))
+    zotero = FakeZotero(ITEM_WITHOUT_ABSTRACT)
+    wire(monkeypatch, zotero, FakeJevClient(outcome=confidence))
 
     result = CliRunner().invoke(app, ["process", "--config", str(config_path), "--apply"])
 
     assert result.exit_code == 0, result.output
     assert "skipped: no abstract" in result.output
-    tags = [entry["tag"] for entry in json.loads(zotero.writes[0].content)["tags"]]
-    assert tags == [
+    assert zotero.applied[0].add_tags == {
         "agent/review",
         "agent/review/missing-abstract",
-        "my own tag",
-        "to-read",
-    ]
+    }
+    # Never marked processed, so the paper is retried once metadata arrives.
+    assert "agent/processed" not in zotero.applied[0].add_tags
 
 
-def test_classifier_failure_is_reported_and_marked(
-    monkeypatch, config: Config, config_path: Path
-):
-    zotero = RecordingZotero(ITEM)
-    wire(monkeypatch, config, zotero, FakeJevClient(error=JevTransportError("upstream down")))
+def test_classifier_failure_is_reported_and_marked(monkeypatch, config_path: Path):
+    zotero = FakeZotero(ITEM)
+    wire(monkeypatch, zotero, FakeJevClient(error=JevTransportError("upstream down")))
 
     result = CliRunner().invoke(app, ["process", "--config", str(config_path), "--apply"])
 
     assert result.exit_code == 1
     assert "classification failed" in result.output
-    tags = [entry["tag"] for entry in json.loads(zotero.writes[0].content)["tags"]]
-    assert tags == ["agent/error", "my own tag", "to-read"]
+    assert zotero.applied[0].add_tags == {"agent/error"}
+    assert "agent/processed" in zotero.applied[0].remove_tags
 
 
 def test_already_processed_papers_are_skipped(
-    monkeypatch, config: Config, config_path: Path, confidence: JevOutcome
+    monkeypatch, config_path: Path, confidence: JevOutcome
 ):
-    processed = {
-        "key": "ABCD2345",
-        "version": 418,
-        "data": {**ITEM["data"], "tags": [{"tag": "agent/processed"}]},
-    }
-    zotero = RecordingZotero(processed)
-    wire(monkeypatch, config, zotero, FakeJevClient(outcome=confidence))
+    zotero = FakeZotero(ITEM_ALREADY_PROCESSED)
+    wire(monkeypatch, zotero, FakeJevClient(outcome=confidence))
 
     result = CliRunner().invoke(app, ["process", "--config", str(config_path), "--apply"])
 
     assert result.exit_code == 0, result.output
-    assert zotero.writes == []
+    assert zotero.applied == []
+
+
+def test_include_processed_reconsiders_them(
+    monkeypatch, config_path: Path, confidence: JevOutcome
+):
+    zotero = FakeZotero(ITEM_ALREADY_PROCESSED)
+    wire(monkeypatch, zotero, FakeJevClient(outcome=confidence))
+
+    result = CliRunner().invoke(
+        app,
+        ["process", "--config", str(config_path), "--apply", "--include-processed"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert len(zotero.applied) == 1
 
 
 def test_setup_failure_exits_cleanly_without_a_traceback(
-    monkeypatch, config: Config, config_path: Path
+    monkeypatch, config_path: Path
 ):
     def unavailable(_config: Config) -> ZoteroClient:
-        raise ZoteroError("no Zotero library ID; set ZOTERO_LIBRARY_ID")
+        raise ZoteroError("could not reach the Zotero local API")
 
     monkeypatch.setattr(main_module, "_zotero_client", unavailable)
 
@@ -236,5 +267,5 @@ def test_setup_failure_exits_cleanly_without_a_traceback(
     )
 
     assert result.exit_code == 2
-    assert "no Zotero library ID" in result.output
+    assert "could not reach the Zotero local API" in result.output
     assert "Traceback" not in result.output

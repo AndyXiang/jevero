@@ -14,14 +14,15 @@ model:
   timeout_seconds: 60.0
 
 zotero:
-  # "web"  -> https://api.zotero.org, needs ZOTERO_API_KEY, supports writes.
-  # "local"-> http://127.0.0.1:23119/api, read-only in Zotero < 10, no key needed.
-  backend: web
-  library_type: user   # user | group
-  # ZOTERO_LIBRARY_ID from .env overrides this when set.
-  library_id: ""
-  inbox_collection: "00 Inbox"
+  # The Zotero desktop local API. Reads need no credentials and no network.
+  # It must be enabled in Zotero: Settings -> Advanced -> "Allow other
+  # applications on this computer to communicate with Zotero".
+  base_url: "http://127.0.0.1:23119/api"
+  # The actual collection name in this library (there is no "00 Inbox").
+  inbox_collection: "00 Read NOW!!!"
   timeout_seconds: 30.0
+  # Writes are not available yet: they need a local API key granted at runtime.
+  # See README.md ("Zotero local API") and archive/README.md.
 
 classification:
   # A missing abstract is not the same as an irrelevant paper. When false, such

@@ -568,25 +568,45 @@ Keep all provider-specific code isolated so that switching to the direct TypeSaf
 
 ## Zotero configuration
 
-Expected environment variables:
+The tool reads Zotero through the **desktop local API** only
+(`http://127.0.0.1:23119/api`). Reads need no credentials, no network, and are
+not rate limited, so Zotero must be running with the local API enabled:
 
-```bash
-ZOTERO_API_KEY=...
-ZOTERO_LIBRARY_ID=...
+```text
+Zotero -> Settings -> Advanced
+    [x] Allow other applications on this computer to communicate with Zotero
 ```
 
-Example `.env.example`:
+If that checkbox is off, every request returns `403 Forbidden`; the client turns
+that into an error naming the setting.
+
+The only credential the tool needs is for the classifier:
 
 ```bash
 OPENROUTER_API_KEY=
-
-ZOTERO_API_KEY=
-ZOTERO_LIBRARY_ID=
 ```
 
-Do not commit `.env`.
+There is no `ZOTERO_API_KEY` or `ZOTERO_LIBRARY_ID`: the local API serves the
+locally logged-in user as library `0`. The zotero.org Web API client is archived
+in `archive/zotero_web_api.py` (see `archive/README.md`).
 
-The initial implementation may use either the Zotero Web API or a supported local API path, but the storage layer should be isolated behind `zotero.py`.
+### Local API writes are not implemented yet
+
+Local writes need more than a key in `.env`:
+
+1. a **local API key**, which Zotero grants at runtime through a confirmation
+   dialog (`POST /api/local/authorize`). It is unrelated to a zotero.org key,
+   cannot be created in advance, and may be single-use;
+2. the **`Zotero-Server-ID`** response header, echoed back on every write
+   (otherwise `428 Precondition Required`);
+3. local object versions, which have **no relation** to Web API versions.
+
+Until that flow exists, `supports_write` is `False` and `--apply` refuses to
+start rather than failing paper by paper. `merge_tags()` — the
+correctness-critical part, preserving unrelated tags — is implemented and unit
+tested.
+
+Do not commit `.env`.
 
 Never mutate Zotero's SQLite database directly.
 

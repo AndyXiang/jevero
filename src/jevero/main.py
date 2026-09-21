@@ -27,8 +27,6 @@ from .config import (
     load_config,
     load_environment,
     openrouter_api_key,
-    zotero_api_key,
-    zotero_library_id,
 )
 from .jev import JevClient, JevError, JevOutcome
 from .models import InputMode, PaperRecord, PolicyActions
@@ -42,7 +40,7 @@ from .policy import (
     plan,
     review_actions,
 )
-from .zotero import ZoteroClient, ZoteroError, ZoteroItem
+from .zotero import ZoteroClient, ZoteroError, ZoteroItem, ZoteroWriteError
 
 DEFAULT_CONFIG = Path("config.yaml")
 
@@ -153,25 +151,26 @@ def check(
 
     load_environment()
     _report_env("OPENROUTER_API_KEY", openrouter_api_key)
-    _report_env("ZOTERO_API_KEY", zotero_api_key)
-
-    if config.zotero.backend == "web":
-        library_id = zotero_library_id(config)
-        if not library_id:
-            typer.secho("  ZOTERO_LIBRARY_ID: missing", fg=typer.colors.YELLOW)
-        else:
-            typer.echo(f"  ZOTERO_LIBRARY_ID: set ({library_id})")
 
     try:
         with _zotero_client(config) as zotero:
             collection_key = zotero.find_collection_key(config.zotero.inbox_collection)
             count = sum(1 for _ in zotero.iter_papers(collection_key=collection_key))
             typer.secho(
+                f"  Zotero local API at {config.zotero.base_url}: ok",
+                fg=typer.colors.GREEN,
+            )
+            typer.secho(
                 f"  Inbox {config.zotero.inbox_collection!r}: {count} top-level items",
                 fg=typer.colors.GREEN,
             )
     except ZoteroError as exc:
-        typer.secho(f"  Zotero: {exc}", fg=typer.colors.RED)
+        typer.secho(f"  Zotero local API: {exc}", fg=typer.colors.RED)
+    typer.secho(
+        "  writes: unavailable (the local API key flow is not implemented yet; "
+        "--apply will refuse)",
+        fg=typer.colors.YELLOW,
+    )
 
 
 def _run(
@@ -183,10 +182,16 @@ def _run(
 ) -> RunSummary:
     summary = RunSummary()
     with _zotero_client(config) as zotero, _jev_client(config) as jev:
+        if mutate and not zotero.supports_write:
+            raise ZoteroWriteError(
+                "cannot write: this client cannot authorize local API writes "
+                "yet. Run with --dry-run to inspect, or restore the archived "
+                "Web API client (archive/README.md)."
+            )
         collection_key = zotero.find_collection_key(config.zotero.inbox_collection)
         typer.echo(
-            f"Inbox {config.zotero.inbox_collection!r} "
-            f"({collection_key}) via {zotero.backend} backend"
+            f"Inbox {config.zotero.inbox_collection!r} ({collection_key}) "
+            f"via the Zotero local API"
         )
 
         for item in zotero.iter_papers(collection_key=collection_key, limit=limit):
@@ -364,10 +369,7 @@ def _render_coverage(
 
 def _zotero_client(config: Config) -> ZoteroClient:
     return ZoteroClient(
-        library_type=config.zotero.library_type,
-        library_id=zotero_library_id(config),
-        api_key=zotero_api_key(),
-        backend=config.zotero.backend,
+        base_url=config.zotero.base_url,
         timeout_seconds=config.zotero.timeout_seconds,
     )
 

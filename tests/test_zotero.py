@@ -1,17 +1,16 @@
-"""Zotero layer tests. HTTP is mocked; Zotero's SQLite is never touched."""
+"""Zotero local API tests. HTTP is mocked; Zotero's SQLite is never touched."""
 
 from __future__ import annotations
-
-import json
 
 import httpx
 import pytest
 
 from jevero.models import PolicyActions
 from jevero.zotero import (
+    LOCAL_BASE_URL,
     ZoteroClient,
-    ZoteroError,
     ZoteroItem,
+    ZoteroLocalApiDisabledError,
     ZoteroNotFoundError,
     ZoteroReadError,
     ZoteroWriteError,
@@ -19,17 +18,27 @@ from jevero.zotero import (
     normalize_item,
 )
 
-LIBRARY_ID = "123456"
 
-
-def make_client(handler, *, api_key: str | None = "zotero-key", backend: str = "web") -> ZoteroClient:
+def make_client(handler) -> ZoteroClient:
     return ZoteroClient(
-        library_type="user",
-        library_id=LIBRARY_ID,
-        api_key=api_key,
-        backend=backend,
+        base_url=LOCAL_BASE_URL,
         http_client=httpx.Client(transport=httpx.MockTransport(handler)),
     )
+
+
+def _unused_handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover
+    raise AssertionError(f"no request expected, got {request.method} {request.url}")
+
+
+def _item(payload: dict) -> ZoteroItem:
+    return ZoteroItem(
+        key=payload["key"], version=payload["version"], data=payload["data"]
+    )
+
+
+# --------------------------------------------------------------------------- #
+# pure helpers
+# --------------------------------------------------------------------------- #
 
 
 def test_normalize_item_extracts_the_internal_model(zotero_item_payload: dict):
@@ -73,7 +82,13 @@ def test_merge_tags_preserves_unrelated_existing_tags():
 
     merged = merge_tags(existing, actions)
 
-    assert merged == ["agent/processed", "my own tag", "to-read", "topic/nrqcd", "topic/quarkonium"]
+    assert merged == [
+        "agent/processed",
+        "my own tag",
+        "to-read",
+        "topic/nrqcd",
+        "topic/quarkonium",
+    ]
 
 
 def test_merge_tags_removes_only_the_requested_tags():
@@ -90,79 +105,24 @@ def test_merge_tags_is_idempotent():
     assert merge_tags(existing, actions) == sorted(existing)
 
 
-def test_apply_actions_writes_the_complete_tag_list(zotero_item_payload: dict):
-    seen: dict = {}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        seen["method"] = request.method
-        seen["url"] = str(request.url)
-        seen["version"] = request.headers.get("If-Unmodified-Since-Version")
-        seen["api_version"] = request.headers.get("Zotero-API-Version")
-        seen["body"] = json.loads(request.content)
-        return httpx.Response(204)
-
-    item = _item(zotero_item_payload)
-    actions = PolicyActions(
-        add_tags={"topic/nrqcd", "agent/processed"}, remove_tags={"topic/quarkonium"}
-    )
-
-    with make_client(handler) as client:
-        result = client.apply_actions(item, actions)
-
-    assert seen["method"] == "PATCH"
-    assert seen["url"] == f"https://api.zotero.org/users/{LIBRARY_ID}/items/ABCD2345"
-    assert seen["version"] == "417"
-    assert seen["api_version"] == "3"
-    tags = [entry["tag"] for entry in seen["body"]["tags"]]
-    # Unrelated tags must survive: Zotero replaces the whole array.
-    assert tags == ["agent/processed", "my own tag", "to-read", "topic/nrqcd"]
-    assert result == tags
+# --------------------------------------------------------------------------- #
+# reads
+# --------------------------------------------------------------------------- #
 
 
-def test_apply_actions_does_nothing_when_there_is_nothing_to_do(zotero_item_payload: dict):
-    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover
-        raise AssertionError("no request expected for empty actions")
-
-    with make_client(handler) as client:
-        assert client.apply_actions(_item(zotero_item_payload), PolicyActions()) == [
-            "to-read",
-            "topic/quarkonium",
-            "my own tag",
-        ]
+def test_client_targets_the_local_user_library():
+    with make_client(_unused_handler) as client:
+        assert client.library_prefix == "/users/0"
 
 
-def test_apply_actions_refuses_without_a_key(zotero_item_payload: dict):
-    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover
-        raise AssertionError("no write may be attempted without a key")
-
-    with make_client(handler, api_key=None, backend="local") as client:
-        assert client.supports_write is False
-        with pytest.raises(ZoteroWriteError, match="API key"):
-            client.apply_actions(
-                _item(zotero_item_payload), PolicyActions(add_tags={"agent/processed"})
-            )
-
-
-def test_apply_actions_reports_a_version_conflict(zotero_item_payload: dict):
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(412, text="Precondition Failed")
-
-    with make_client(handler) as client:
-        with pytest.raises(ZoteroWriteError, match="changed since it was read"):
-            client.apply_actions(
-                _item(zotero_item_payload), PolicyActions(add_tags={"agent/processed"})
-            )
-
-
-def test_apply_actions_reports_other_write_failures(zotero_item_payload: dict):
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(403, text="Forbidden")
-
-    with make_client(handler) as client:
-        with pytest.raises(ZoteroWriteError, match="HTTP 403"):
-            client.apply_actions(
-                _item(zotero_item_payload), PolicyActions(add_tags={"agent/processed"})
-            )
+def test_constructed_client_defaults_to_the_local_api():
+    """No transport injection: exercise the real construction path."""
+    client = ZoteroClient()
+    try:
+        assert client.base_url == LOCAL_BASE_URL
+        assert client.library_prefix == "/users/0"
+    finally:
+        client.close()
 
 
 def test_iter_papers_skips_attachments_and_notes():
@@ -174,7 +134,10 @@ def test_iter_papers_skips_attachments_and_notes():
     ]
 
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == f"/users/{LIBRARY_ID}/collections/INBOX123/items/top"
+        assert request.url.path == "/api/users/0/collections/INBOX123/items/top"
+        assert request.headers["Zotero-API-Version"] == "3"
+        # Reads need no credentials on the local API.
+        assert "Authorization" not in request.headers
         return httpx.Response(200, json=page)
 
     with make_client(handler) as client:
@@ -205,7 +168,7 @@ def test_find_collection_key_matches_by_name():
     ]
 
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == f"/users/{LIBRARY_ID}/collections"
+        assert request.url.path == "/api/users/0/collections"
         return httpx.Response(200, json=collections)
 
     with make_client(handler) as client:
@@ -239,50 +202,49 @@ def test_read_errors_are_not_silently_swallowed():
             client.get_item("ABCD2345")
 
 
-def test_local_backend_uses_the_desktop_api_and_no_key():
-    with ZoteroClient(
-        library_type="user",
-        library_id="",
-        backend="local",
-        http_client=httpx.Client(transport=httpx.MockTransport(_unused_handler)),
-    ) as client:
-        assert client.library_prefix == "/users/0"
+def test_disabled_local_api_reports_how_to_enable_it():
+    """A 403 from the local API is a Zotero preference, not a bad request."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, text="Local API is not enabled")
+
+    with make_client(handler) as client:
+        with pytest.raises(ZoteroLocalApiDisabledError) as excinfo:
+            client.find_collection_key("00 Inbox")
+
+    message = str(excinfo.value)
+    assert "Settings -> Advanced" in message
+    assert "communicate with Zotero" in message
+
+
+def test_unreachable_zotero_reports_the_running_hint():
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused", request=request)
+
+    with make_client(handler) as client:
+        with pytest.raises(ZoteroReadError, match="is the Zotero desktop app running"):
+            client.find_collection_key("00 Inbox")
+
+
+# --------------------------------------------------------------------------- #
+# writes: deliberately unavailable until the local key flow exists
+# --------------------------------------------------------------------------- #
+
+
+def test_writes_are_not_available_yet(zotero_item_payload: dict):
+    with make_client(_unused_handler) as client:
         assert client.supports_write is False
 
-
-def test_web_backend_requires_a_library_id():
-    with pytest.raises(ZoteroError, match="library ID"):
-        ZoteroClient(library_type="user", library_id="", backend="web")
-
-
-def test_group_library_prefix():
-    with make_client(_unused_handler, backend="web") as client:
-        assert client.library_prefix == f"/users/{LIBRARY_ID}"
-
-    with ZoteroClient(
-        library_type="group",
-        library_id="42",
-        backend="web",
-        http_client=httpx.Client(transport=httpx.MockTransport(_unused_handler)),
-    ) as client:
-        assert client.library_prefix == "/groups/42"
+        with pytest.raises(ZoteroWriteError, match="api/local/authorize"):
+            client.apply_actions(
+                _item(zotero_item_payload), PolicyActions(add_tags={"agent/processed"})
+            )
 
 
-def test_constructed_client_defaults_to_the_web_api(monkeypatch: pytest.MonkeyPatch):
-    """No transport injection: exercise the real client construction path."""
-    client = ZoteroClient(library_type="user", library_id=LIBRARY_ID, backend="web")
-    try:
-        assert client.library_prefix == f"/users/{LIBRARY_ID}"
-    finally:
-        client.close()
-
-
-def _unused_handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover
-    raise AssertionError(f"no request expected, got {request.method} {request.url}")
-
-
-def _item(payload: dict) -> ZoteroItem:
-    """Build the item object the read path would produce for this fixture."""
-    return ZoteroItem(
-        key=payload["key"], version=payload["version"], data=payload["data"]
-    )
+def test_empty_actions_are_a_no_op_and_do_not_raise(zotero_item_payload: dict):
+    with make_client(_unused_handler) as client:
+        assert client.apply_actions(_item(zotero_item_payload), PolicyActions()) == [
+            "to-read",
+            "topic/quarkonium",
+            "my own tag",
+        ]

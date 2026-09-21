@@ -6,7 +6,13 @@ from pathlib import Path
 
 import pytest
 
-from jevero.config import Config, ConfigError, load_config, zotero_library_id
+from jevero.config import (
+    Config,
+    ConfigError,
+    MissingEnvironmentError,
+    load_config,
+    openrouter_api_key,
+)
 
 def write_config(tmp_path: Path, body: str) -> Path:
     path = tmp_path / "config.yaml"
@@ -20,7 +26,8 @@ def test_loads_a_valid_config(config: Config):
     assert set(config.coverage) == {"covered", "missing-topic", "irrelevant"}
     assert config.thresholds.topic_apply == 0.85
     assert config.thresholds.covered_apply == 0.70
-    assert config.zotero.library_id == "123456"
+    assert config.zotero.base_url == "http://127.0.0.1:23119/api"
+    assert config.zotero.inbox_collection == "00 Inbox"
     assert config.classification.allow_title_only is False
 
 
@@ -202,9 +209,27 @@ def test_top_level_must_be_a_mapping(tmp_path: Path):
         load_config(path)
 
 
-def test_env_library_id_overrides_config(config: Config, monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("ZOTERO_LIBRARY_ID", "999")
-    assert zotero_library_id(config) == "999"
+def test_zotero_config_has_no_web_api_credentials(tmp_path: Path):
+    """The active client must not accept Web API settings any more."""
+    path = write_config(
+        tmp_path,
+        "topics:\n  nrqcd:\n    description: ok\n"
+        "coverage: [covered, missing-topic, irrelevant]\n"
+        "zotero:\n  api_key: secret\n",
+    )
 
-    monkeypatch.delenv("ZOTERO_LIBRARY_ID")
-    assert zotero_library_id(config) == "123456"
+    with pytest.raises(ConfigError, match="api_key"):
+        load_config(path)
+
+
+def test_openrouter_key_is_required(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+    with pytest.raises(MissingEnvironmentError, match="OPENROUTER_API_KEY"):
+        openrouter_api_key()
+
+
+def test_openrouter_key_is_read_from_the_environment(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
+
+    assert openrouter_api_key() == "sk-test"

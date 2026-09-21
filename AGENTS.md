@@ -159,6 +159,12 @@ The `projects` dimension (per-project usefulness) is **not implemented**. It was
 - The dimensions that exist today are `topics`, `roles`, and `coverage`.
 - The design for re-adding projects lives in `docs/projects-design.md`. Do not re-implement it from memory, and do not add it back without an explicit design decision.
 
+The **Zotero Web API is also deferred**. Zotero is read through the desktop local API on `127.0.0.1:23119` only; the Web API client is archived in `archive/zotero_web_api.py`, with restore instructions in `archive/README.md`.
+
+- Reads need no credentials and no network. The local API must be enabled in Zotero's preferences, otherwise every request returns `403`.
+- **Writes are not implemented.** Local writes need a runtime-granted local API key plus a `Zotero-Server-ID` header. `ZoteroClient.supports_write` is `False` and `--apply` refuses to start, so no code path may claim a write succeeded.
+- Do not put a `ZOTERO_API_KEY` / `ZOTERO_LIBRARY_ID` path back into active code without restoring the archived client deliberately.
+
 ---
 
 ## Expected Repository Structure
@@ -578,13 +584,13 @@ The code should remain understandable to a new contributor in one sitting.
 
 Secrets belong in environment variables.
 
-Expected variables may include:
+Expected variables:
 
 ```text
 OPENROUTER_API_KEY
-ZOTERO_API_KEY
-ZOTERO_LIBRARY_ID
 ```
+
+`ZOTERO_API_KEY` and `ZOTERO_LIBRARY_ID` belonged to the archived Web API client and are no longer read by any active code.
 
 Provide `.env.example`, never commit `.env`.
 

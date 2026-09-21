@@ -3,9 +3,7 @@ model:
   name: "typesafe/jev-1.13"
 
 zotero:
-  backend: web
-  library_type: user
-  library_id: "123456"
+  base_url: "http://127.0.0.1:23119/api"
   inbox_collection: "00 Inbox"
 
 classification:
