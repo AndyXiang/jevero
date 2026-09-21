@@ -210,8 +210,10 @@ def route(
 ) -> None:
     """File papers into collections based on the tags they already have.
 
-    Never calls the classifier: this only reads tags and writes collection
-    membership, so re-running it after changing the collection settings is free.
+    Only papers directly in the configured inbox are considered, so this never
+    walks the whole library. It never calls the classifier either: it only reads
+    tags and writes collection membership, so re-running it after changing the
+    collection settings is free.
     """
     if apply and dry_run:
         raise typer.BadParameter("--apply and --dry-run are mutually exclusive")

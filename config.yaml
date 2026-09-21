@@ -21,10 +21,10 @@ zotero:
   # Which collection to classify. Matched against the collection name, or
   # against a "Parent/Child" path when names repeat. List them with:
   #   jevero collections
-  inbox_collection: "00 Read NOW!!!"
+  inbox_collection: "00 Inbox"
   timeout_seconds: 30.0
-  # Writes are not available yet: they need a local API key granted at runtime.
-  # See README.md ("Zotero local API") and archive/README.md.
+  # Writes need Zotero 10+ and a local API key that Zotero grants at runtime.
+  # The first write shows a dialog: choose "Always Allow".
 
 classification:
   # A missing abstract is not the same as an irrelevant paper. When false, such
