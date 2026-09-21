@@ -1,6 +1,6 @@
 model:
   provider: openrouter
-  name: "~typesafe/jev-latest"
+  name: "typesafe/jev-1.13"
 
 zotero:
   backend: web

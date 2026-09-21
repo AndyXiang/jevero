@@ -554,10 +554,13 @@ Jev should be configurable rather than hard-coded:
 ```yaml
 model:
   provider: openrouter
-  name: typesafe/jev
+  name: typesafe/jev-1.13
 ```
 
-Use the current Jev model identifier supported by OpenRouter when implementing the client.
+Pin a concrete Jev version rather than an alias: the `~typesafe/jev-latest` alias
+advertises no routable endpoint on OpenRouter, so a request against it can fail.
+Check `GET https://openrouter.ai/api/v1/models/typesafe/jev-1.13/endpoints`
+before bumping the version.
 
 Keep all provider-specific code isolated so that switching to the direct TypeSafe API later does not affect policy or Zotero code.
 

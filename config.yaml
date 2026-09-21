@@ -6,9 +6,10 @@
 model:
   provider: openrouter
   # Jev is a decision model, reached through OpenRouter's Decisions endpoint.
-  # `~typesafe/jev-latest` tracks the newest version; pin e.g. `typesafe/jev-1.13`
-  # once a version is validated against the local validation set.
-  name: "~typesafe/jev-latest"
+  # Pin the version: the `~typesafe/jev-latest` alias advertises no routable
+  # endpoint (checked 2026-05), so requests against it can fail. Bump this
+  # deliberately after re-running the validation set.
+  name: "typesafe/jev-1.13"
   base_url: "https://openrouter.ai/api"
   timeout_seconds: 60.0
 

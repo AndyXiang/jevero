@@ -96,7 +96,7 @@ class ModelConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     provider: Literal["openrouter"] = "openrouter"
-    name: str = "~typesafe/jev-latest"
+    name: str = "typesafe/jev-1.13"
     base_url: str = "https://openrouter.ai/api"
     timeout_seconds: float = Field(default=60.0, gt=0)
 
