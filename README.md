@@ -1,4 +1,4 @@
-# zotero-jev
+# jevero
 
 A minimal, auditable Zotero literature-classification tool powered by Jev.
 
@@ -11,7 +11,7 @@ title + abstract + metadata
     ↓
 Jev
     ↓
-topic / project / role / taxonomy-coverage probabilities
+topic / role / taxonomy-coverage probabilities   (projects deferred)
     ↓
 deterministic Python policy
     ↓
@@ -21,6 +21,13 @@ Zotero tags
 The first version intentionally does **not** summarize papers, parse full PDFs, use a second LLM, or act as an autonomous research agent.
 
 Its job is classification and routing.
+
+> **Current implementation status.** The classifiable dimensions today are
+> `topics`, `roles`, and `coverage`. The `projects` dimension is designed but
+> **not implemented**: it has been removed from the code and from `config.yaml`,
+> and the design for adding it back lives in
+> [`docs/projects-design.md`](docs/projects-design.md). `config.yaml` rejects a
+> `projects:` key rather than ignoring it.
 
 ---
 
@@ -58,9 +65,10 @@ The initial implementation should do only the following:
 3. classify each paper with Jev through OpenRouter;
 4. estimate:
    - topic membership,
-   - project relevance,
    - paper role,
    - taxonomy coverage;
+
+   (`project relevance` is designed but deferred; see the status note above.)
 5. convert probabilities into deterministic actions;
 6. write namespaced tags back to Zotero;
 7. flag ambiguous or taxonomy-missing papers for human review.
@@ -106,9 +114,6 @@ It returns structured probability estimates such as:
     "quarkonium": 0.97,
     "scet": 0.18
   },
-  "projects": {
-    "qec": 0.93
-  },
   "roles": {
     "core": 0.84,
     "method": 0.46
@@ -121,6 +126,8 @@ It returns structured probability estimates such as:
 }
 ```
 
+(`projects` is deferred, so this example no longer includes it.)
+
 ### Policy layer
 
 Python applies explicit thresholds:
@@ -129,11 +136,8 @@ Python applies explicit thresholds:
 if result.topics["nrqcd"] >= 0.85:
     add_tag("topic/nrqcd")
 
-if result.projects["qec"] >= 0.85:
-    add_tag("project/qec")
-
 if result.coverage["missing-topic"] >= 0.70:
-    add_tag("ai/topic-review")
+    add_tag("agent/review/taxonomy-gap")
 ```
 
 Jev never directly mutates Zotero.
@@ -166,7 +170,7 @@ The paper appears relevant to the literature workflow, but none of the current t
 The paper should be marked:
 
 ```text
-ai/topic-review
+agent/review/taxonomy-gap
 ```
 
 and reviewed by a human.
@@ -202,6 +206,8 @@ topic/experiment
 
 ### Project tags
 
+Deferred: these tags are not written yet; see `docs/projects-design.md`.
+
 ```text
 project/qec
 project/jpsi-ccbar
@@ -221,12 +227,31 @@ role/reference
 
 ### Processing tags
 
+A paper gets exactly one **state** tag. A paper awaiting a human additionally
+gets one or more **reason** tags, so "show me everything waiting on a human" is
+a single tag query while each reason still forms its own work queue.
+
 ```text
-ai/processed
-ai/review
-ai/topic-review
-ai/error
+# state
+agent/processed
+agent/review
+agent/error
+
+# reasons, always attached together with agent/review
+agent/review/ambiguous        # a judgement landed in the review band
+agent/review/coverage         # covered is low: what is this paper?
+agent/review/taxonomy-gap     # in scope, but no configured topic fits
+agent/review/missing-abstract # too little text to judge
 ```
+
+Each reason maps to a different next action:
+
+| reason | what a human should do |
+| --- | --- |
+| `ambiguous` | calibrate a threshold, or rewrite a description in `config.yaml` |
+| `coverage` | read the paper and decide what it is |
+| `taxonomy-gap` | decide whether `config.yaml` needs a new topic |
+| `missing-abstract` | supply metadata, or accept a title-only classification |
 
 Priority may either be classified by Jev later or derived deterministically from project relevance and role:
 
@@ -306,25 +331,27 @@ topics:
       Experimental measurements, detector-level analyses,
       and direct presentation of collider data.
 
-projects:
-  qec:
-    description: >
-      Papers useful for quarkonium energy-correlator research,
-      including perturbative and nonperturbative factorization,
-      energy-flow observables, NRQCD/pNRQCD, SCET where relevant,
-      quarkonium phenomenology, and experimental measurements.
-
-  jpsi-ccbar:
-    description: >
-      Papers useful for associated J/psi plus charm production,
-      color transfer, NRQCD production mechanisms,
-      phase-space dependence, and related phenomenology.
-
-  general-hep:
-    description: >
-      Papers of broader methodological relevance to perturbative QCD,
-      amplitudes, EFT, heavy-flavor physics, or computational HEP.
-
+# DEFERRED - not implemented; see docs/projects-design.md
+#
+# projects:
+#   qec:
+#     description: >
+#       Papers useful for quarkonium energy-correlator research,
+#       including perturbative and nonperturbative factorization,
+#       energy-flow observables, NRQCD/pNRQCD, SCET where relevant,
+#       quarkonium phenomenology, and experimental measurements.
+#
+#   jpsi-ccbar:
+#     description: >
+#       Papers useful for associated J/psi plus charm production,
+#       color transfer, NRQCD production mechanisms,
+#       phase-space dependence, and related phenomenology.
+#
+#   general-hep:
+#     description: >
+#       Papers of broader methodological relevance to perturbative QCD,
+#       amplitudes, EFT, heavy-flavor physics, or computational HEP.
+#
 roles:
   - core
   - method
@@ -340,12 +367,13 @@ coverage:
 
 thresholds:
   topic_apply: 0.85
-  project_apply: 0.85
+  # project_apply: 0.85  # deferred with the projects dimension
   role_apply: 0.85
 
   review: 0.55
   missing_topic_review: 0.70
   irrelevant: 0.80
+  covered_apply: 0.70
 ```
 
 These values are starting points, not final truth.
@@ -365,7 +393,7 @@ paper
   ↓
 coverage.missing-topic is high
   ↓
-ai/topic-review
+agent/review/taxonomy-gap
   ↓
 human review
 ```
@@ -376,7 +404,7 @@ For example:
 
 ```text
 paper A ─┐
-paper B ─┼─→ ai/topic-review ─→ recurring lattice-QCD theme
+paper B ─┼─→ agent/review/taxonomy-gap ─→ recurring lattice-QCD theme
 paper C ─┘
 ```
 
@@ -401,20 +429,21 @@ The taxonomy therefore grows from observed literature rather than from model-gen
 Suggested initial repository:
 
 ```text
-zotero-jev/
+jevero/
 ├── AGENTS.md
 ├── README.md
 ├── pyproject.toml
 ├── .env.example
 ├── config.yaml
 └── src/
-    └── zotero_jev/
+    └── jevero/
         ├── __init__.py
         ├── main.py
         ├── config.py
         ├── models.py
         ├── zotero.py
         ├── jev.py
+        ├── http.py
         └── policy.py
 ```
 
@@ -573,7 +602,7 @@ The processor should operate on papers that:
 ```text
 are in the configured Inbox
 AND
-do not have ai/processed
+do not have agent/processed
 ```
 
 The exact collection lookup mechanism can be configured later.
@@ -589,13 +618,13 @@ Mutation must not be the default behavior.
 Recommended commands:
 
 ```bash
-zotero-jev process --dry-run
+jevero process --dry-run
 ```
 
 and:
 
 ```bash
-zotero-jev process --apply
+jevero process --apply
 ```
 
 Example dry-run:
@@ -608,9 +637,6 @@ Topics
   quarkonium              0.96  APPLY
   nrqcd                   0.91  APPLY
   scet                    0.42
-
-Projects
-  qec                     0.95  APPLY
 
 Roles
   core                    0.87  APPLY
@@ -625,9 +651,8 @@ Planned tags
   + topic/energy-correlator
   + topic/quarkonium
   + topic/nrqcd
-  + project/qec
   + role/core
-  + ai/processed
+  + agent/processed
 ```
 
 Use dry-run on a representative validation set before enabling automatic writes.
@@ -645,7 +670,7 @@ p >= 0.85
     automatically apply
 
 0.55 <= p < 0.85
-    ambiguous; consider ai/review
+    ambiguous; consider agent/review
 
 p < 0.55
     ignore
@@ -655,11 +680,19 @@ Coverage uses separate thresholds:
 
 ```text
 missing-topic >= 0.70
-    → ai/topic-review
+    → agent/review/taxonomy-gap
 
 irrelevant >= 0.80
     → process without assigning a topic
+
+covered < 0.70
+    → agent/review/coverage
 ```
+
+`covered` is the taxonomy's own adequacy judgement: when it is not convincing,
+and neither "out of scope" nor "missing topic" explains why, the paper is
+reported rather than acted on. That holds even when a topic tag did apply, so a
+confident topic cannot hide a taxonomy that fits poorly.
 
 These thresholds should be tuned empirically.
 
@@ -724,10 +757,18 @@ The MVP uses Zotero tags instead of a local database.
 Supported state tags:
 
 ```text
-ai/processed
-ai/review
-ai/topic-review
-ai/error
+agent/processed
+agent/review
+agent/error
+```
+
+A review state always carries at least one reason tag:
+
+```text
+agent/review/ambiguous
+agent/review/coverage
+agent/review/taxonomy-gap
+agent/review/missing-abstract
 ```
 
 This keeps the first version simple.
@@ -749,7 +790,7 @@ A likely development flow:
 
 ```bash
 git clone <repository-url>
-cd zotero-jev
+cd jevero
 
 python -m venv .venv
 source .venv/bin/activate
@@ -791,7 +832,6 @@ Load and validate:
 
 ```text
 topics
-projects
 roles
 coverage
 thresholds

@@ -1,0 +1,26 @@
+{
+  "key": "ABCD2345",
+  "version": 417,
+  "library": { "type": "user", "id": 123456 },
+  "data": {
+    "key": "ABCD2345",
+    "version": 417,
+    "itemType": "journalArticle",
+    "title": "Energy Correlators in Heavy Quarkonium Production",
+    "abstractNote": "We study energy correlators for quarkonium production and resum large logarithms.",
+    "creators": [
+      { "creatorType": "author", "firstName": "Ada", "lastName": "Lovelace" },
+      { "creatorType": "author", "firstName": "Emmy", "lastName": "Noether" },
+      { "creatorType": "editor", "firstName": "Editor", "lastName": "Person" }
+    ],
+    "date": "2019-05-01",
+    "DOI": "10.1000/example.doi",
+    "extra": "arXiv:1905.01234 [hep-ph]",
+    "tags": [
+      { "tag": "to-read" },
+      { "tag": "topic/quarkonium" },
+      { "tag": "my own tag" }
+    ],
+    "collections": ["INBOX123"]
+  }
+}

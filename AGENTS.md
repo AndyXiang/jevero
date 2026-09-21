@@ -31,7 +31,7 @@ The system is intentionally narrow. It is not an autonomous research agent and s
 Jev may estimate semantic probabilities such as:
 
 - topic membership,
-- project relevance,
+- project relevance (deferred, see "Current Scope" below),
 - paper role,
 - taxonomy coverage.
 
@@ -103,10 +103,10 @@ The first working version should write namespaced tags such as:
 ```text
 topic/nrqcd
 topic/quarkonium
-project/qec
-status/processed
-status/need-review
-status/error
+role/core
+agent/processed
+agent/review
+agent/error
 ```
 
 Do not automatically move papers between Zotero collections in the first iteration.
@@ -142,7 +142,7 @@ Interpretation:
 If `missing-topic` is sufficiently probable, add:
 
 ```text
-status/need-review
+agent/review/taxonomy-gap
 ```
 
 Taxonomy expansion is a human decision.
@@ -151,25 +151,37 @@ Never let Jev invent and persist new topic names automatically.
 
 ---
 
+## Current Scope: `projects` is deferred
+
+The `projects` dimension (per-project usefulness) is **not implemented**. It was removed from the code, from `ClassificationResult`, and from `config.yaml`, and it will be added back later under its own design.
+
+- `config.yaml` must not contain a `projects:` key; unknown keys are rejected rather than ignored.
+- The dimensions that exist today are `topics`, `roles`, and `coverage`.
+- The design for re-adding projects lives in `docs/projects-design.md`. Do not re-implement it from memory, and do not add it back without an explicit design decision.
+
+---
+
 ## Expected Repository Structure
 
 Keep the first implementation approximately as follows:
 
 ```text
-zotero-jev/
+jevero/
 ├── AGENTS.md
 ├── README.md
 ├── pyproject.toml
 ├── .env.example
 ├── config.yaml
 └── src/
-    ├── __init__.py
-    ├── main.py
-    ├── config.py
-    ├── models.py
-    ├── zotero.py
-    ├── jev.py
-    └── policy.py
+    └── jevero/
+        ├── __init__.py
+        ├── main.py
+        ├── config.py
+        ├── models.py
+        ├── zotero.py
+        ├── jev.py
+        ├── http.py
+        └── policy.py
 ```
 
 Optional tests:
@@ -233,13 +245,6 @@ topics:
     description: >
       Production, decay, spectroscopy, or structure of heavy quarkonium.
 
-projects:
-  qec:
-    description: >
-      Work relevant to quarkonium energy correlators, including
-      perturbative and nonperturbative factorization, NRQCD/pNRQCD,
-      energy-flow observables, and related phenomenology.
-
 roles:
   - core
   - method
@@ -255,11 +260,11 @@ coverage:
 
 thresholds:
   topic_apply: 0.85
-  project_apply: 0.85
   role_apply: 0.85
   review: 0.55
   missing_topic_review: 0.70
   irrelevant: 0.80
+  covered_apply: 0.70
 ```
 
 Descriptions should be meaningful enough for semantic classification.
@@ -294,7 +299,6 @@ For example:
 ```python
 class ClassificationResult(BaseModel):
     topics: dict[str, float]
-    projects: dict[str, float]
     roles: dict[str, float]
     coverage: dict[str, float]
 ```
@@ -324,7 +328,7 @@ The MVP should not send full PDF text.
 
 The classifier output should contain probabilities only, not prose explanations, unless a short diagnostic explanation is explicitly enabled for debugging.
 
-Prefer one classification request per paper that evaluates all configured topics/projects/roles/coverage states together.
+Prefer one classification request per paper that evaluates all configured topics/roles/coverage states together.
 
 ---
 
@@ -354,27 +358,29 @@ Initial policy examples:
 topic probability >= topic_apply
     → add topic/<name>
 
-project probability >= project_apply
-    → add project/<name>
-
 role probability >= role_apply
     → add role/<name>
 
 coverage.missing-topic >= missing_topic_review
-    → add ai/topic-review
+    → add agent/review/taxonomy-gap
 
 coverage.irrelevant >= irrelevant
     → mark processed without adding a topic
 
-ambiguous classifications
-    → add ai/review
+coverage.covered < covered_apply
+    → add agent/review/coverage
+
+probability of any judgement in [review, apply)
+    → add agent/review/ambiguous
 
 successful processing
-    → add ai/processed
+    → add agent/processed
 
 processing failure
-    → add ai/error
+    → add agent/error
 ```
+
+A review state (`agent/review`) must always be accompanied by at least one reason tag, so that every flagged paper says why it was flagged. The reasons are `agent/review/ambiguous`, `agent/review/coverage`, `agent/review/taxonomy-gap`, and `agent/review/missing-abstract`.
 
 Avoid hidden policy inside prompts.
 
@@ -384,14 +390,24 @@ Avoid hidden policy inside prompts.
 
 For the MVP, use Zotero tags as state markers.
 
-Supported states:
+A paper gets exactly one state tag:
 
 ```text
-ai/processed
-ai/review
-ai/topic-review
-ai/error
+agent/processed
+agent/review
+agent/error
 ```
+
+A paper in the review state additionally gets one or more reason tags:
+
+```text
+agent/review/ambiguous        # a judgement landed in the review band
+agent/review/coverage         # covered is low: what is this paper?
+agent/review/taxonomy-gap     # in scope, but no configured topic fits
+agent/review/missing-abstract # too little text to judge
+```
+
+State and reason are deliberately separate: `agent/review` answers "does a human need to look?" while the reason selects the queue and names the next action. `agent/error` removes the review state and its reasons, so a failed paper sits in exactly one queue.
 
 Do not add a local database yet.
 
@@ -400,7 +416,7 @@ Candidate selection should ignore already processed papers unless the user expli
 Reclassification support may later be exposed through a CLI command such as:
 
 ```bash
-zotero-jev reclassify --tag ai/topic-review
+jevero reclassify --tag agent/review/taxonomy-gap
 ```
 
 ---
@@ -412,7 +428,7 @@ The CLI should be safe by default.
 Prefer:
 
 ```bash
-zotero-jev process --dry-run
+jevero process --dry-run
 ```
 
 for inspection.
@@ -420,7 +436,7 @@ for inspection.
 Require an explicit flag for mutations:
 
 ```bash
-zotero-jev process --apply
+jevero process --apply
 ```
 
 A useful dry-run output is:
@@ -432,9 +448,6 @@ Topics
   quarkonium              0.97
   nrqcd                   0.91
   energy-correlator       0.88
-
-Projects
-  qec                     0.94
 
 Roles
   core                    0.86
@@ -448,9 +461,8 @@ Planned actions
   + topic/quarkonium
   + topic/nrqcd
   + topic/energy-correlator
-  + project/qec
   + role/core
-  + ai/processed
+  + agent/processed
 ```
 
 Dry-run must not mutate Zotero.
@@ -473,7 +485,7 @@ At minimum distinguish:
 
 A paper that fails processing should remain recoverable.
 
-Prefer adding `ai/error` only when it is safe to do so and when Zotero itself is reachable.
+Prefer adding `agent/error` only when it is safe to do so and when Zotero itself is reachable.
 
 Log enough context to identify the Zotero item key and stage that failed.
 
@@ -490,7 +502,7 @@ For the first version:
 - if an abstract exists, classify normally;
 - if no abstract exists, either skip and mark for review or allow title-only classification behind an explicit configuration option.
 
-Do not silently downgrade title-only results to normal confidence.
+Both paths carry `agent/review/missing-abstract`, so thin evidence is always visible in the review queue. Do not silently downgrade title-only results to normal confidence.
 
 ---
 
@@ -498,7 +510,7 @@ Do not silently downgrade title-only results to normal confidence.
 
 Taxonomy changes are expected.
 
-When papers repeatedly receive `ai/topic-review`, the human maintainer may decide to add a new topic to `config.yaml`.
+When papers repeatedly receive `agent/review/taxonomy-gap`, the human maintainer may decide to add a new topic to `config.yaml`.
 
 Do not automatically create taxonomy entries.
 
@@ -506,7 +518,7 @@ A useful future workflow is:
 
 ```text
 classify
-→ collect ai/topic-review
+→ collect agent/review/taxonomy-gap
 → human reviews recurring unknown themes
 → edit config.yaml
 → reclassify review queue

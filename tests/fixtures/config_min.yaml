@@ -1,0 +1,40 @@
+model:
+  provider: openrouter
+  name: "~typesafe/jev-latest"
+
+zotero:
+  backend: web
+  library_type: user
+  library_id: "123456"
+  inbox_collection: "00 Inbox"
+
+classification:
+  allow_title_only: false
+  scope: "Test scope for unit tests."
+
+topics:
+  quarkonium:
+    description: >
+      Production, decay, spectroscopy, or structure of heavy quarkonium.
+  nrqcd:
+    description: >
+      NRQCD factorization and long-distance matrix elements.
+
+# Deliberately the bare-list form from the design docs, to prove it is accepted.
+roles:
+  - core
+  - method
+
+coverage:
+  - covered
+  - missing-topic
+  - irrelevant
+
+thresholds:
+  topic_apply: 0.85
+  role_apply: 0.85
+
+  review: 0.55
+  missing_topic_review: 0.70
+  irrelevant: 0.80
+  covered_apply: 0.70
