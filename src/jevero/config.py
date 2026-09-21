@@ -115,6 +115,9 @@ class ZoteroConfig(BaseModel):
     inbox_collection: str = "00 Inbox"
     #: Name shown in the Zotero write-authorization dialog.
     app_name: str = "jevero"
+    #: The authorization request waits for a human to answer Zotero's dialog,
+    #: so it needs a longer timeout than ordinary local API calls.
+    authorize_timeout_seconds: float = Field(default=120.0, gt=0)
     timeout_seconds: float = Field(default=30.0, gt=0)
 
 

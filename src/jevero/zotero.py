@@ -195,11 +195,13 @@ class ZoteroClient:
         *,
         base_url: str = LOCAL_BASE_URL,
         timeout_seconds: float = 30.0,
+        authorize_timeout_seconds: float = 120.0,
         app_name: str = APP_NAME,
         http_client: httpx.Client | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.app_name = app_name
+        self._authorize_timeout = authorize_timeout_seconds
         self._http = http_client or create_client(timeout_seconds)
         self._owns_client = http_client is None
         self._server_id: str | None = None
@@ -354,11 +356,14 @@ class ZoteroClient:
                 rate-limited dialogs.
         """
         server_id = self._require_server_id()
+        # A human has to answer a dialog, so this one request is allowed to
+        # take much longer than an ordinary local API call.
         response = self._request(
             "POST",
             AUTHORIZE_PATH,
             json={"appName": self.app_name},
             headers={"Zotero-Server-ID": server_id},
+            timeout=self._authorize_timeout,
         )
 
         if response.status_code == 403:
@@ -520,6 +525,7 @@ class ZoteroClient:
         params: dict[str, Any] | None = None,
         json: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
+        timeout: float | httpx.Timeout | None = None,
     ) -> httpx.Response:
         request_headers = {"Zotero-API-Version": ZOTERO_API_VERSION}
         if headers:
@@ -531,6 +537,7 @@ class ZoteroClient:
                 params=params,
                 json=json,
                 headers=request_headers,
+                timeout=timeout,
             )
         except httpx.HTTPError as exc:
             raise ZoteroReadError(

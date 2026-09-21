@@ -382,6 +382,27 @@ def test_authorization_accepts_always_allow():
         assert client.authorize_writes() == "local-key-1"
 
 
+def test_authorization_allows_time_for_a_human_to_answer():
+    """The dialog is interactive, so it must not use the short read timeout."""
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/local/authorize":
+            seen["timeout"] = request.extensions.get("timeout")
+            return httpx.Response(200, json={"key": "k", "remember": True})
+        return httpx.Response(200, text="", headers={"Zotero-Server-ID": "srv-9"})
+
+    client = ZoteroClient(
+        base_url=LOCAL_BASE_URL,
+        authorize_timeout_seconds=99.0,
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    with client:
+        client.authorize_writes()
+
+    assert seen["timeout"]["read"] == 99.0
+
+
 def test_authorization_request_carries_the_server_id_and_app_name():
     seen: dict = {}
 

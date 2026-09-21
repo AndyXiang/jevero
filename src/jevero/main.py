@@ -467,6 +467,7 @@ def _zotero_client(config: Config) -> ZoteroClient:
     return ZoteroClient(
         base_url=config.zotero.base_url,
         timeout_seconds=config.zotero.timeout_seconds,
+        authorize_timeout_seconds=config.zotero.authorize_timeout_seconds,
         app_name=config.zotero.app_name,
     )
 
