@@ -24,42 +24,44 @@ from .models import (
 )
 
 TAG_TOPIC_PREFIX = "topic/"
-TAG_ROLE_PREFIX = "role/"
+#: What kind of paper this is (theory / method / overview / ...). Named ``kind``
+#: rather than ``role`` because that is what the dimension actually asks: after
+#: ``role/core`` was retired, nothing here is about the reader's work any more.
+TAG_KIND_PREFIX = "kind/"
 
-#: Agent state markers. The MVP uses tags as state; there is no local DB.
+#: Why a paper needs a human. This is the one piece of machine output a reader is
+#: meant to *read and filter on* inside Zotero, so it stays a tag namespace — the
+#: ``04 Review`` collection is the queue, and these tags are the reasons inside it.
 #:
-#: A paper gets exactly one *state* tag, and a review state additionally gets
-#: one or more *reason* tags. State and reason are split so that "show me
-#: everything waiting on a human" is a single tag query (``agent/review``)
-#: while each reason still forms its own work queue.
-STATE_PROCESSED = "agent/processed"
-STATE_REVIEW = "agent/review"
-STATE_ERROR = "agent/error"
-
-#: Why a paper needs a human. Every reason maps to a different next action,
-#: which is the whole point of naming them separately.
-#:
-#: ``ambiguous``    the topics stayed undecided: nothing cleared
-#:                  ``topic_apply``, yet the best guess was plausible ->
-#:                  calibrate a threshold or rewrite a description;
+#: ``ambiguous``    the topics stayed undecided: nothing cleared the floor, yet
+#:                  the best guess was plausible -> calibrate a threshold or
+#:                  rewrite a description;
 #: ``coverage``     the coverage judgement itself is unconvincing (``covered``
 #:                  is low) -> read the paper and decide what it is;
 #: ``taxonomy-gap`` in scope, but no configured topic fits -> decide whether
 #:                  ``config.yaml`` needs a new topic (a human decision);
 #: ``missing-abstract`` too little text to judge -> supply metadata or accept
 #:                  a title-only classification.
-REASON_AMBIGUOUS = "agent/review/ambiguous"
-REASON_COVERAGE = "agent/review/coverage"
-REASON_TAXONOMY_GAP = "agent/review/taxonomy-gap"
-REASON_MISSING_ABSTRACT = "agent/review/missing-abstract"
+REVIEW_PREFIX = "review/"
+REASON_AMBIGUOUS = REVIEW_PREFIX + "ambiguous"
+REASON_COVERAGE = REVIEW_PREFIX + "coverage"
+REASON_TAXONOMY_GAP = REVIEW_PREFIX + "taxonomy-gap"
+REASON_MISSING_ABSTRACT = REVIEW_PREFIX + "missing-abstract"
 
 REVIEW_REASONS: frozenset[str] = frozenset(
     {REASON_AMBIGUOUS, REASON_COVERAGE, REASON_TAXONOMY_GAP, REASON_MISSING_ABSTRACT}
 )
 
-PROCESSING_STATES: frozenset[str] = frozenset(
-    {STATE_PROCESSED, STATE_REVIEW, STATE_ERROR}
-) | REVIEW_REASONS
+#: Machine bookkeeping keys in Zotero's free-text ``extra`` field. Everything the
+#: tool needs but a reader would never browse by lives here rather than in a tag:
+#:
+#: ``fingerprint`` which model, prompt, vocabulary and thresholds produced the
+#:                 current tags. Its presence *is* "this paper was judged"; a
+#:                 different value means the judgement is out of date.
+#: ``error``       the last attempt failed, and why. Cleared by the next success,
+#:                 so a failure is retried rather than frozen in place.
+EXTRA_FINGERPRINT = "jevero-fingerprint"
+EXTRA_ERROR = "jevero-error"
 
 
 class PolicyError(Exception):
@@ -71,16 +73,20 @@ def plan(
     config: Config,
     *,
     input_mode: InputMode = InputMode.FULL,
+    fingerprint: str | None = None,
 ) -> PolicyActions:
     """Translate one classification result into tag actions.
 
     Args:
-        result: probabilities for every configured topic, role, and coverage
+        result: probabilities for every configured topic, kind, and coverage
             state.
         config: the validated configuration supplying taxonomy and thresholds.
         input_mode: ``TITLE_ONLY`` results always carry the
-            ``agent/review/missing-abstract`` reason, so a thin-evidence
-            classification is never silently trusted.
+            ``review/missing-abstract`` reason, so a thin-evidence classification
+            is never silently trusted.
+        fingerprint: judgement digest to record in the item's ``extra`` field. It
+            supersedes whatever was there, which is how staleness is detected
+            without a local database.
 
     Raises:
         PolicyError: the result is missing entries the configuration requires,
@@ -89,12 +95,14 @@ def plan(
     _check_dimensions(result, config)
     thresholds = config.thresholds
 
-    applied_topics = _above(result.topics, config.topics, thresholds.topic_apply)
-    applied_roles = _above(result.roles, config.roles, thresholds.role_apply)
+    applied_topics = _select_topics(result, config)
+    applied_kinds = _above(result.kinds, config.kinds, thresholds.kind_floor)[
+        : thresholds.kind_max
+    ]
 
     actions = PolicyActions()
     actions.add_tags.update(TAG_TOPIC_PREFIX + name for name in applied_topics)
-    actions.add_tags.update(TAG_ROLE_PREFIX + name for name in applied_roles)
+    actions.add_tags.update(TAG_KIND_PREFIX + name for name in applied_kinds)
 
     # Coverage is modelled separately from topic membership: there is no
     # `topic/other`. Each coverage state is compared against its own threshold,
@@ -120,53 +128,113 @@ def plan(
     if input_mode is InputMode.TITLE_ONLY:
         reasons.add(REASON_MISSING_ABSTRACT)
 
-    if reasons:
-        actions.add_tags.add(STATE_REVIEW)
-        actions.add_tags.update(reasons)
+    actions.add_tags.update(reasons)
+    # `extra` carries the bookkeeping a reader would never browse by: the
+    # judgement stamp, and the absence of a past failure. The stamp's presence is
+    # what "judged" means, so there is no processed tag to write.
+    actions.extra[EXTRA_FINGERPRINT] = fingerprint
+    actions.extra[EXTRA_ERROR] = None
 
-    # A paper that was classified successfully is marked processed even when it
-    # is out of scope or flagged for review; the flags are what the human reads.
-    actions.add_tags.add(STATE_PROCESSED)
-    return _converged(actions)
+    return _reconcile_vocabulary(_reconcile_review(actions), config)
 
 
-def error_actions() -> PolicyActions:
+def _select_topics(result: ClassificationResult, config: Config) -> list[str]:
+    """Which topics a paper gets: a guaranteed band, then a ranked band.
+
+    Independent judgements have no natural cut-off, so selection is split into two
+    questions that do have answers:
+
+    * at or above ``topic_guaranteed`` a topic is headline material for the paper;
+      it is applied whatever the cap says, so a paper with four genuine topics can
+      never lose one to a counting rule;
+    * between ``apply_floor`` and that band, topics are ranked and only the
+      strongest fill what the guaranteed band left of ``topic_max``.
+
+    The floor sits in the empty valley of the judgement distribution, so noise
+    cannot flip membership; the cap decides focus, which makes the result
+    independent of how many words the vocabulary happens to contain.
+    """
+    thresholds = config.thresholds
+    ranked = _above(result.topics, config.topics, thresholds.apply_floor)
+    selected = [
+        name for name in ranked if result.topics[name] >= thresholds.topic_guaranteed
+    ]
+    for name in ranked:
+        if len(selected) >= thresholds.topic_max:
+            break
+        if name not in selected:
+            selected.append(name)
+    return selected
+
+
+def vocabularies(config: Config) -> dict[str, set[str]]:
+    """Managed tag names, grouped for reporting: topics, kinds, retired."""
+    return {
+        "topics": {TAG_TOPIC_PREFIX + name for name in config.topics},
+        "kinds": {TAG_KIND_PREFIX + name for name in config.kinds},
+        "retired": {TAG_TOPIC_PREFIX + name for name in config.retired_topics}
+        | {TAG_KIND_PREFIX + name for name in config.retired_kinds},
+    }
+
+
+def _reconcile_review(actions: PolicyActions) -> PolicyActions:
+    """Report the full set of review reasons, so a stale one cannot linger.
+
+    Review reasons are a small closed set, so convergence is just "every reason
+    the plan did not ask for goes away". Without it a paper that stops being
+    ambiguous would keep the reason a previous run wrote.
+    """
+    actions.remove_tags |= REVIEW_REASONS - actions.add_tags
+    return actions
+
+
+def _reconcile_vocabulary(actions: PolicyActions, config: Config) -> PolicyActions:
+    """Report the full machine-owned vocabulary, so superseded words go away.
+
+    ``topic/*`` and ``kind/*`` are machine-owned (see AGENTS.md): every run states
+    what these namespaces should contain, and a name the plan does not ask for is
+    removed. That is what makes retiring a word clean up after itself instead of
+    leaving tags that no longer mean anything.
+
+    Only names we know about are ever removed — the current vocabulary, plus
+    anything listed as retired. A ``topic/...`` tag the reader typed themselves is
+    neither, so it survives untouched. Whole namespaces that were renamed are
+    cleared through ``retired_prefixes``, because their old names cannot be
+    enumerated one by one.
+    """
+    known = vocabularies(config)
+    managed = known["topics"] | known["kinds"] | known["retired"]
+    actions.remove_tags |= managed - actions.add_tags
+    actions.remove_tag_prefixes |= set(config.retired_prefixes)
+    return actions
+
+
+def error_actions(reason: str) -> PolicyActions:
     """Actions for a paper whose processing failed.
 
-    The paper leaves the processed and review queues and lands in exactly one
-    queue, ``agent/error``, so a stale review reason cannot linger. It stays in
-    the candidate set and remains recoverable.
+    A failure clears the judgement stamp and its review reasons — the paper is
+    back to "not judged", so the next run retries it — and records why in
+    ``extra``. It is never filed into a collection, because nothing trustworthy
+    can be said about where it belongs.
     """
-    return _converged(PolicyActions(add_tags={STATE_ERROR}))
+    actions = PolicyActions(remove_tags=set(REVIEW_REASONS))
+    actions.extra[EXTRA_FINGERPRINT] = None
+    actions.extra[EXTRA_ERROR] = reason
+    return actions
 
 
 def review_actions() -> PolicyActions:
     """Actions for a paper that was skipped instead of classified.
 
     Used when an abstract is missing and title-only classification is disabled:
-    the paper is never treated as processed, and the reason records why.
+    the paper is not judged (no stamp), and the reason records why.
     """
-    return _converged(
-        PolicyActions(add_tags={STATE_REVIEW, REASON_MISSING_ABSTRACT})
+    return _reconcile_review(
+        PolicyActions(
+            add_tags={REASON_MISSING_ABSTRACT},
+            extra={EXTRA_FINGERPRINT: None, EXTRA_ERROR: None},
+        )
     )
-
-
-def _converged(actions: PolicyActions) -> PolicyActions:
-    """Report the full managed state, so a re-run removes superseded state tags.
-
-    ``add_tags`` alone is not enough: a plan that no longer wants
-    ``agent/review`` would leave the tag a previous run (or an older policy)
-    wrote, and the library would accumulate the union of every judgement ever
-    made. Removing every managed state tag the plan does not ask for makes
-    reclassification converge instead of accumulating.
-
-    Only the ``agent/*`` namespace is managed this way. ``topic/*`` and
-    ``role/*`` stay add-only: a human may have added them by hand, and the
-    model's probabilities drift by a few hundredths between runs, so removing
-    them would delete intent and flap.
-    """
-    actions.remove_tags |= PROCESSING_STATES - actions.add_tags
-    return actions
 
 
 def _above(
@@ -188,13 +256,13 @@ def _has_ambiguous(result: ClassificationResult, config: Config) -> bool:
     interrupting a human for. A dimension with nothing applied whose best
     candidate is merely plausible is genuinely undecided, and gets reported.
 
-    Only topics are considered. Roles are facets, so "no confident role" is a
-    normal outcome rather than something to report, and with several roles
-    review would fire on almost every paper. Roles still produce tags; they just
+    Only topics are considered. Kinds are facets, so "no confident kind" is a
+    normal outcome rather than something to report, and with several kinds
+    review would fire on almost every paper. Kinds still produce tags; they just
     do not decide whether a human is needed.
     """
     thresholds = config.thresholds
-    dimensions = ((result.topics, config.topics, thresholds.topic_apply),)
+    dimensions = ((result.topics, config.topics, thresholds.apply_floor),)
     for probabilities, configured, apply_threshold in dimensions:
         if any(probabilities[name] >= apply_threshold for name in configured):
             continue  # this dimension is decided
@@ -207,7 +275,7 @@ def _check_dimensions(result: ClassificationResult, config: Config) -> None:
     """Reject results that are missing configured names or invent new ones."""
     dimensions = (
         ("topics", result.topics, config.topics),
-        ("roles", result.roles, config.roles),
+        ("kinds", result.kinds, config.kinds),
         ("coverage", result.coverage, config.coverage),
     )
     for label, probabilities, configured in dimensions:

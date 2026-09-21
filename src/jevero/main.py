@@ -15,8 +15,9 @@ Safety rules enforced here:
 from __future__ import annotations
 
 import os
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections import Counter
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import typer
@@ -31,19 +32,20 @@ from .config import (
     store_zotero_write_key,
     zotero_write_key,
 )
-from .jev import JevClient, JevError, JevOutcome, JevTransportError
+from .jev import JevClient, JevError, JevOutcome, JevTransportError, fingerprint
 from .models import InputMode, PaperRecord, PolicyActions
-from .routing import is_managed_path, target_paths
+from .routing import foreign_tags, is_managed_path, target_paths
 from .policy import (
+    EXTRA_ERROR,
+    EXTRA_FINGERPRINT,
     REASON_MISSING_ABSTRACT,
-    STATE_ERROR,
-    STATE_PROCESSED,
-    STATE_REVIEW,
-    TAG_ROLE_PREFIX,
+    REVIEW_PREFIX,
+    TAG_KIND_PREFIX,
     TAG_TOPIC_PREFIX,
     error_actions,
     plan,
     review_actions,
+    vocabularies,
 )
 from .zotero import (
     ZoteroClient,
@@ -80,6 +82,15 @@ class RunSummary:
     skipped: int = 0
     failed: int = 0
     cost: float = 0.0
+    #: How often each topic/kind tag came out of this run, and how many papers
+    #: were judged. Printed at the end: a word that never fires, or one that
+    #: fires on almost every paper, is a vocabulary problem, and it should be
+    #: visible the moment it appears rather than months later.
+    applied: Counter[str] = field(default_factory=Counter)
+    considered: int = 0
+    #: Papers judged because their fingerprint was out of date, so a run that
+    #: re-classifies the library says why it did.
+    stale: int = 0
     #: Set when the classifier became unreachable: the run stops, because a
     #: transport failure says nothing about any individual paper.
     unavailable: str | None = None
@@ -90,6 +101,9 @@ class RouteSummary:
     routed: int = 0
     skipped: int = 0
     failed: int = 0
+    #: `topic/...` / `kind/...` tags that are neither configured nor retired.
+    #: Never routed (the vocabulary is closed) and worth reporting.
+    foreign: set[str] = field(default_factory=set)
 
 
 @app.command()
@@ -161,6 +175,7 @@ def process(
     )
     if summary.cost:
         typer.echo(f"classifier cost: ${summary.cost:.6f}")
+    _render_vocabulary(config, summary)
     if summary.unavailable:
         typer.secho(
             f"stopped: the classifier is unreachable ({summary.unavailable}); no "
@@ -209,9 +224,7 @@ def collections(
                 line = f"  {path:<{width}}  {collection.key}"
                 if counts:
                     items = list(zotero.iter_papers(collection_key=collection.key))
-                    pending = sum(
-                        1 for item in items if STATE_PROCESSED not in item.tags
-                    )
+                    pending = sum(1 for item in items if _fingerprint(item) is None)
                     line += f"  papers={len(items):<4} unprocessed={pending}"
                 if path == configured or collection.name == configured:
                     line += "   <- configured"
@@ -290,6 +303,7 @@ def run(
     )
     if summary.cost:
         typer.echo(f"classifier cost: ${summary.cost:.6f}")
+    _render_vocabulary(config, summary)
     if route_summary is not None:
         typer.echo(
             f"Filed: {route_summary.routed} routed, {route_summary.skipped} unchanged"
@@ -318,7 +332,7 @@ def _report_inbox_remainder(config: Config) -> None:
         typer.secho("Inbox is now empty.", fg=typer.colors.GREEN)
         return
 
-    unclassified = [item for item in items if STATE_PROCESSED not in item.tags]
+    unclassified = [item for item in items if _fingerprint(item) is None]
     need_metadata = [
         item for item in unclassified if REASON_MISSING_ABSTRACT in item.tags
     ]
@@ -408,6 +422,17 @@ def route(
 
     typer.echo("")
     typer.echo(f"{summary.routed} routed, {summary.skipped} unchanged, {summary.failed} failed")
+    if summary.foreign:
+        typer.secho(
+            f"{len(summary.foreign)} managed-namespace tag(s) are neither "
+            "configured nor retired, so they were not routed: "
+            + ", ".join(sorted(summary.foreign)),
+            fg=typer.colors.YELLOW,
+        )
+        typer.echo(
+            "    add them to config.yaml, or retire them so the next "
+            "`process --apply` removes them"
+        )
     if summary.failed:
         raise typer.Exit(code=1)
 
@@ -428,9 +453,13 @@ def check(
     typer.echo(f"config: {config_path}")
     typer.echo(f"  model:    {config.model.provider} / {config.model.name}")
     typer.echo(
-        f"  topics:   {len(config.topics)}  roles: {len(config.roles)}"
+        f"  topics:   {len(config.topics)}  kinds: {len(config.kinds)}"
     )
     typer.echo(f"  coverage: {', '.join(config.coverage)}")
+    retired = vocabularies(config)["retired"]
+    typer.echo(f"  fingerprint: {fingerprint(config)}")
+    if retired:
+        typer.echo(f"  retired words: {', '.join(sorted(retired))}")
     typer.echo(
         "  title-only classification: "
         f"{'allowed' if config.classification.allow_title_only else 'disabled'}"
@@ -467,6 +496,33 @@ def check(
                 f"  Inbox {config.zotero.inbox_collection!r}: {count} top-level items",
                 fg=typer.colors.GREEN,
             )
+            library = list(zotero.iter_papers(collection_key=None))
+            stamp = fingerprint(config)
+            judged = [item for item in library if _fingerprint(item) is not None]
+            stale = sum(
+                1
+                for item in judged
+                if _is_stale(item, stamp, legacy_prefixes=config.retired_prefixes)
+            )
+            legacy = [
+                item
+                for item in library
+                if _fingerprint(item) is None
+                and _is_stale(item, stamp, legacy_prefixes=config.retired_prefixes)
+            ]
+            if stale or legacy:
+                typer.secho(
+                    f"  out of date: {stale + len(legacy)} of {len(library)} papers "
+                    "need judging with the current configuration; the next "
+                    "`process` picks them up",
+                    fg=typer.colors.YELLOW,
+                )
+            else:
+                typer.secho(
+                    f"  up to date: all {len(judged)} judged papers match the "
+                    "current fingerprint",
+                    fg=typer.colors.GREEN,
+                )
             if zotero.server_id:
                 typer.secho(
                     "  local writes: available (stored key reused, no dialog)"
@@ -506,6 +562,102 @@ def _resolve_scope(
         zotero.find_collection_key(config.zotero.inbox_collection),
         f"inbox {config.zotero.inbox_collection!r}",
     )
+
+
+def _fingerprint(item: ZoteroItem) -> str | None:
+    """The judgement stamp recorded on an item, if it was judged at all."""
+    return item.extra_values.get(EXTRA_FINGERPRINT)
+
+
+def _is_stale(
+    item: ZoteroItem, stamp: str, *, legacy_prefixes: Iterable[str] = ()
+) -> bool:
+    """True when a paper was judged before, but not with the current fingerprint.
+
+    A paper with no judgement at all is not stale: whether to judge it is a
+    question about scope. Evidence of an earlier judgement is a fingerprint, the
+    current state tag, or any tag under a namespace that has since been renamed
+    (``legacy_prefixes``) — a paper carrying those was judged by an older version,
+    so its tags came from an older model, prompt, vocabulary, or threshold set.
+
+    That last clause is what makes the first run after the fingerprint was
+    introduced do something: those papers carry ``agent/processed`` and no stamp,
+    and without it they would be neither up to date nor out of date.
+    """
+    current = _fingerprint(item)
+    if current == stamp:
+        return False
+    if current is not None:
+        return True
+    prefixes = {prefix for prefix in legacy_prefixes if prefix}
+    return any(tag.startswith(prefix) for tag in item.tags for prefix in prefixes)
+
+
+def _candidates(
+    zotero: ZoteroClient,
+    *,
+    scope_key: str | None,
+    stamp: str,
+    include_processed: bool,
+    library_wide_staleness: bool,
+    legacy_prefixes: Iterable[str] = (),
+) -> list[ZoteroItem]:
+    """Papers this run should judge.
+
+    Three reasons to include one: it has never been processed (new work), its
+    judgement is out of date, or ``--include-processed`` asked for a forced
+    re-run. For an inbox-scoped run staleness is checked across the whole library,
+    because a configuration change is not a property of the inbox — and routing
+    is what moves papers out of the inbox in the first place.
+    """
+    stale = lambda item: _is_stale(item, stamp, legacy_prefixes=legacy_prefixes)
+    found: dict[str, ZoteroItem] = {
+        item.key: item for item in zotero.iter_papers(collection_key=scope_key)
+    }
+    if library_wide_staleness:
+        for item in zotero.iter_papers(collection_key=None):
+            if stale(item):
+                found.setdefault(item.key, item)
+
+    selected: list[ZoteroItem] = []
+    for item in found.values():
+        if include_processed or _fingerprint(item) is None or stale(item):
+            selected.append(item)
+    return selected
+
+
+def _render_vocabulary(config: Config, summary: RunSummary) -> None:
+    """Per-word usage for this run.
+
+    There are two ways a word stops carrying information: it never fires, or it
+    fires on nearly every paper. Neither is visible from the tag panel, and both
+    are cheap to say out loud at the moment they appear.
+    """
+    if not summary.considered:
+        return
+    total = summary.considered
+    typer.echo("")
+    typer.echo(f"Vocabulary usage (of {total} papers judged this run)")
+    dimensions = (
+        (TAG_TOPIC_PREFIX, config.topics),
+        (TAG_KIND_PREFIX, config.kinds),
+    )
+    for prefix, names in dimensions:
+        for name in names:
+            tag = prefix + name
+            count = summary.applied.get(tag, 0)
+            note = ""
+            if count == 0:
+                note = "   <- never applied"
+            elif count * 2 >= total:
+                note = "   <- on most papers; carries little information"
+            typer.echo(f"  {tag:<28} {count:>3}/{total}{note}")
+    retired = vocabularies(config)["retired"]
+    if retired:
+        typer.echo(
+            "  retired (tags removed, never re-added): "
+            + ", ".join(sorted(retired))
+        )
 
 
 def _confirm_wide_scope(label: str, count: int, *, default_scope: bool) -> None:
@@ -561,24 +713,44 @@ def _run(
         scope_key, scope_label = _resolve_scope(
             zotero, config, collection=collection, whole_library=whole_library
         )
-        candidates = [
-            item
-            for item in zotero.iter_papers(collection_key=scope_key)
-            if include_processed or STATE_PROCESSED not in item.tags
-        ]
-        # `--limit` counts papers to process, not items to look at: an
-        # already-processed paper must not eat one of the slots.
+        inbox_key = zotero.find_collection_key(config.zotero.inbox_collection)
+        stamp = fingerprint(config)
+        candidates = _candidates(
+            zotero,
+            scope_key=scope_key,
+            stamp=stamp,
+            include_processed=include_processed,
+            # A stale paper is stale wherever it lives: routing moves papers out
+            # of the inbox, and a vocabulary change must still reach them.
+            library_wide_staleness=scope_key == inbox_key,
+            legacy_prefixes=config.retired_prefixes,
+        )
+        summary.stale = sum(
+            1
+            for item in candidates
+            if _is_stale(item, stamp, legacy_prefixes=config.retired_prefixes)
+        )
+        # `--limit` counts papers to process, not items to look at: a paper that
+        # needs no work must not eat one of the slots.
         if limit is not None:
             candidates = candidates[:limit]
         typer.echo(f"Scope: {scope_label} via the Zotero local API")
         typer.echo(f"Candidates: {len(candidates)} papers")
+        if summary.stale:
+            typer.echo(
+                f"  {summary.stale} of them were judged with another model, "
+                "prompt, vocabulary, or threshold set"
+            )
         if mutate:
             _confirm_wide_scope(
                 scope_label,
                 len(candidates),
                 default_scope=scope_key is not None
-                and scope_key
-                == zotero.find_collection_key(config.zotero.inbox_collection),
+                and scope_key == inbox_key
+                and all(
+                    inbox_key in (item.data.get("collections") or [])
+                    for item in candidates
+                ),
             )
         if mutate:
             typer.secho(
@@ -591,7 +763,13 @@ def _run(
         with _jev_client(config) as jev:
             for item in candidates:
                 _process_one(
-                    item, config, zotero=zotero, jev=jev, mutate=mutate, summary=summary
+                    item,
+                    config,
+                    zotero=zotero,
+                    jev=jev,
+                    mutate=mutate,
+                    summary=summary,
+                    stamp=stamp,
                 )
                 if summary.unavailable is not None:
                     break
@@ -625,7 +803,13 @@ def _route(
             zotero, config, collection=collection, whole_library=whole_library
         )
         items = list(zotero.iter_papers(collection_key=scope_key))
-        routable = [item for item in items if target_paths(item.tags, config)]
+        for item in items:
+            summary.foreign.update(foreign_tags(item.tags, config))
+        routable = [
+            item
+            for item in items
+            if target_paths(item.tags, config, judged=_fingerprint(item) is not None)
+        ]
         summary.skipped = len(items) - len(routable)
         if limit is not None:
             routable = routable[:limit]
@@ -639,7 +823,7 @@ def _route(
             )
 
         for item in routable:
-            paths = target_paths(item.tags, config)
+            paths = target_paths(item.tags, config, judged=True)
             current = {str(key) for key in (item.data.get("collections") or [])}
             try:
                 resolved = _resolve_targets(zotero, paths, mutate=mutate)
@@ -714,6 +898,7 @@ def _process_one(
     jev: JevClient,
     mutate: bool,
     summary: RunSummary,
+    stamp: str,
 ) -> None:
     try:
         paper = item.to_paper()
@@ -737,14 +922,21 @@ def _process_one(
         return
     except JevError as exc:
         typer.secho(f"[{paper.zotero_key}] classification failed: {exc}", fg=typer.colors.RED)
-        _fail(item, zotero=zotero, mutate=mutate)
+        _fail(item, zotero=zotero, mutate=mutate, reason=str(exc))
         summary.failed += 1
         return
 
-    actions = plan(outcome.result, config, input_mode=paper.input_mode)
+    actions = plan(
+        outcome.result, config, input_mode=paper.input_mode, fingerprint=stamp
+    )
     _render(PaperPlan(item=item, paper=paper, actions=actions, outcome=outcome), config)
     if outcome.usage and outcome.usage.cost:
         summary.cost += outcome.usage.cost
+
+    summary.considered += 1
+    for tag in actions.add_tags:
+        if tag.startswith(TAG_TOPIC_PREFIX) or tag.startswith(TAG_KIND_PREFIX):
+            summary.applied[tag] += 1
 
     if _is_flagged(actions):
         summary.flagged += 1
@@ -765,12 +957,19 @@ def _write(
         summary.failed += 1
 
 
-def _fail(item: ZoteroItem, *, zotero: ZoteroClient, mutate: bool) -> None:
-    """Mark a failed paper so it stays visible, but only when that is safe."""
+def _fail(
+    item: ZoteroItem, *, zotero: ZoteroClient, mutate: bool, reason: str
+) -> None:
+    """Record a failure on the paper, but only when that is safe.
+
+    The stamp is cleared and the reason kept in ``extra``: the paper goes back to
+    "not judged", so the next run retries it instead of trusting tags produced
+    before the failure.
+    """
     if not mutate or not zotero.supports_write:
         return
     try:
-        zotero.apply_actions(item, error_actions())
+        zotero.apply_actions(item, error_actions(reason))
     except ZoteroError as exc:
         typer.secho(
             f"[{item.key}] could not record the failure in Zotero: {exc}",
@@ -797,7 +996,7 @@ def _apply_review_skip(paper: PaperRecord, *, zotero: ZoteroClient, mutate: bool
 
 
 def _is_flagged(actions: PolicyActions) -> bool:
-    return bool({STATE_REVIEW, STATE_ERROR} & actions.add_tags)
+    return any(tag.startswith(REVIEW_PREFIX) for tag in actions.add_tags)
 
 
 def _render(plan_result: PaperPlan, config: Config) -> None:
@@ -823,19 +1022,16 @@ def _render(plan_result: PaperPlan, config: Config) -> None:
     if paper.input_mode is not InputMode.FULL:
         typer.secho("  input: title-only", fg=typer.colors.YELLOW)
 
-    thresholds = config.thresholds
     _render_scores(
         "Topics",
         outcome.result.topics,
         TAG_TOPIC_PREFIX,
-        thresholds.topic_apply,
         plan_result.actions,
     )
     _render_scores(
-        "Roles",
-        outcome.result.roles,
-        TAG_ROLE_PREFIX,
-        thresholds.role_apply,
+        "Kinds",
+        outcome.result.kinds,
+        TAG_KIND_PREFIX,
         plan_result.actions,
     )
     _render_coverage(outcome.result.coverage, plan_result.actions, config)
@@ -843,15 +1039,35 @@ def _render(plan_result: PaperPlan, config: Config) -> None:
     typer.echo("Planned tags")
     for tag in sorted(plan_result.actions.add_tags):
         typer.secho(f"  + {tag}", fg=typer.colors.GREEN)
-    for tag in sorted(plan_result.actions.remove_tags):
+    # The plan removes every known name it did not ask for, so that the tag set
+    # converges; show only the removals that are actually on this paper.
+    current = set(plan_result.item.tags)
+    removals = {tag for tag in plan_result.actions.remove_tags if tag in current}
+    prefixes = plan_result.actions.remove_tag_prefixes
+    if prefixes:
+        removals |= {
+            tag for tag in current if any(tag.startswith(p) for p in prefixes)
+        }
+    removals -= plan_result.actions.add_tags
+    for tag in sorted(removals):
         typer.secho(f"  - {tag}", fg=typer.colors.RED)
+    for key, value in sorted(plan_result.actions.extra.items()):
+        previous = plan_result.item.extra_values.get(key)
+        if value == previous:
+            continue
+        if value is None:
+            shown = f"   (clears {EXTRA_FINGERPRINT if key == EXTRA_FINGERPRINT else key})"
+            label = f"  extra {key} removed{shown}"
+        else:
+            note = f"   (was {previous})" if previous else ""
+            label = f"  extra {key} = {value}{note}"
+        typer.secho(label, fg=typer.colors.BLUE)
 
 
 def _render_scores(
     title: str,
     scores: dict[str, float],
     prefix: str,
-    apply_threshold: float,
     actions: PolicyActions,
 ) -> None:
     typer.echo(f"\n{title}")
@@ -874,7 +1090,7 @@ def _render_coverage(
         boundary = limits.get(name)
         marker = f"  >= {boundary:.2f}" if boundary is not None and probability >= boundary else ""
         typer.echo(f"  {name:<24} {probability:.2f}{marker}")
-    for tag in sorted(t for t in actions.add_tags if t.startswith("agent/")):
+    for tag in sorted(t for t in actions.add_tags if t.startswith(REVIEW_PREFIX)):
         typer.echo(f"  -> {tag}")
 
 

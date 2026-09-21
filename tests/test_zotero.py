@@ -25,6 +25,8 @@ from jevero.zotero import (
     ZoteroReadError,
     ZoteroWriteError,
     merge_collections,
+    extra_values,
+    merge_extra,
     merge_tags,
     normalize_item,
 )
@@ -89,12 +91,12 @@ def test_normalize_item_reads_a_single_field_creator():
 
 def test_merge_tags_preserves_unrelated_existing_tags():
     existing = ["to-read", "topic/quarkonium", "my own tag"]
-    actions = PolicyActions(add_tags={"topic/nrqcd", "agent/processed"})
+    actions = PolicyActions(add_tags={"topic/nrqcd", "jevero/processed"})
 
     merged = merge_tags(existing, actions)
 
     assert merged == [
-        "agent/processed",
+        "jevero/processed",
         "my own tag",
         "to-read",
         "topic/nrqcd",
@@ -103,17 +105,74 @@ def test_merge_tags_preserves_unrelated_existing_tags():
 
 
 def test_merge_tags_removes_only_the_requested_tags():
-    existing = ["agent/processed", "agent/error", "to-read"]
-    actions = PolicyActions(add_tags={"agent/processed"}, remove_tags={"agent/error"})
+    existing = ["jevero/processed", "jevero/error", "to-read"]
+    actions = PolicyActions(add_tags={"jevero/processed"}, remove_tags={"jevero/error"})
 
-    assert merge_tags(existing, actions) == ["agent/processed", "to-read"]
+    assert merge_tags(existing, actions) == ["jevero/processed", "to-read"]
 
 
 def test_merge_tags_is_idempotent():
-    existing = ["agent/processed", "topic/nrqcd"]
-    actions = PolicyActions(add_tags={"agent/processed"})
+    existing = ["jevero/processed", "topic/nrqcd"]
+    actions = PolicyActions(add_tags={"jevero/processed"})
 
     assert merge_tags(existing, actions) == sorted(existing)
+
+
+def test_merge_tags_clears_a_renamed_namespace_but_keeps_the_new_names():
+    """A rename is one plan: clear `role/*` and add `kind/*` in the same write."""
+    existing = ["role/theory", "role/method", "to-read", "kind/review"]
+    actions = PolicyActions(
+        add_tags={"kind/theory"},
+        remove_tag_prefixes={"role/"},
+    )
+
+    assert merge_tags(existing, actions) == ["kind/review", "kind/theory", "to-read"]
+
+
+def test_extra_values_reads_key_value_lines():
+    extra = "Citation Key: lovelace2019\njevero-fingerprint: 9f3c1a77\nnote: keep me"
+
+    assert extra_values(extra) == {
+        "citation key": "lovelace2019",
+        "jevero-fingerprint": "9f3c1a77",
+        "note": "keep me",
+    }
+    assert extra_values(None) == {}
+    assert extra_values("jevero-fingerprint:") == {}  # an empty value is not a value
+    assert extra_values("just some prose") == {}
+
+
+def test_merge_extra_preserves_what_other_tools_wrote():
+    """`extra` is shared (Zotero and Better BibTeX both write to it)."""
+    existing = "Citation Key: lovelace2019\n\nnotes: keep the blank line"
+
+    merged = merge_extra(existing, {"jevero-fingerprint": "9f3c1a77"})
+
+    assert merged == (
+        "Citation Key: lovelace2019\n\nnotes: keep the blank line\n"
+        "jevero-fingerprint: 9f3c1a77"
+    )
+
+
+def test_merge_extra_replaces_a_superseded_value_without_growing():
+    existing = "Citation Key: lovelace2019\njevero-fingerprint: oldstamp"
+
+    once = merge_extra(existing, {"jevero-fingerprint": "newstamp"})
+    twice = merge_extra(once, {"jevero-fingerprint": "newstamp"})
+
+    assert once == "Citation Key: lovelace2019\njevero-fingerprint: newstamp"
+    assert twice == once
+
+
+def test_merge_extra_can_clear_a_line():
+    """A failure clears the stamp; a later success clears the failure."""
+    existing = "jevero-fingerprint: oldstamp\njevero-error: HTTP 500"
+
+    merged = merge_extra(
+        existing, {"jevero-fingerprint": "newstamp", "jevero-error": None}
+    )
+
+    assert merged == "jevero-fingerprint: newstamp"
 
 
 # --------------------------------------------------------------------------- #
@@ -366,7 +425,7 @@ def test_unauthorized_zotero_without_a_server_id_cannot_write(
 
         with pytest.raises(ZoteroWriteError, match="9.0.6"):
             client.apply_actions(
-                _item(zotero_item_payload), PolicyActions(add_tags={"agent/processed"})
+                _item(zotero_item_payload), PolicyActions(add_tags={"jevero/processed"})
             )
 
     assert api.patch_headers == []
@@ -466,20 +525,20 @@ def test_apply_actions_authorizes_once_then_writes_merged_tags(
     api = LocalApi()
     item = _item(zotero_item_payload)
     actions = PolicyActions(
-        add_tags={"topic/nrqcd", "agent/processed"}, remove_tags={"topic/quarkonium"}
+        add_tags={"topic/nrqcd", "jevero/processed"}, remove_tags={"topic/quarkonium"}
     )
 
     with make_client(api.handler) as client:
         merged = client.apply_actions(item, actions)
         # Second write reuses the remembered key: no second dialog.
-        client.apply_actions(item, PolicyActions(add_tags={"role/core"}))
+        client.apply_actions(item, PolicyActions(add_tags={"kind/core"}))
 
     assert api.authorize_calls == 1
     assert api.patch_headers[0]["If-Unmodified-Since-Version"] == "417"
     assert api.patch_headers[0]["Zotero-Server-ID"] == "srv-1"
     assert api.patch_headers[0]["Zotero-API-Key"] == "local-key-1"
     tags = [entry["tag"] for entry in api.patch_bodies[0]["tags"]]
-    assert tags == ["agent/processed", "my own tag", "to-read", "topic/nrqcd"]
+    assert tags == ["jevero/processed", "my own tag", "to-read", "topic/nrqcd"]
     assert merged == tags
 
 
@@ -488,13 +547,13 @@ def test_apply_actions_reauthorizes_once_after_a_401(zotero_item_payload: dict):
 
     with make_client(api.handler) as client:
         merged = client.apply_actions(
-            _item(zotero_item_payload), PolicyActions(add_tags={"agent/processed"})
+            _item(zotero_item_payload), PolicyActions(add_tags={"jevero/processed"})
         )
 
     assert api.authorize_calls == 2
     assert len(api.patch_headers) == 2
     assert api.patch_headers[1]["Zotero-API-Key"] == "local-key-2"
-    assert "agent/processed" in merged
+    assert "jevero/processed" in merged
 
 
 def test_apply_actions_reports_a_changed_item(zotero_item_payload: dict):
@@ -503,7 +562,7 @@ def test_apply_actions_reports_a_changed_item(zotero_item_payload: dict):
     with make_client(api.handler) as client:
         with pytest.raises(ZoteroWriteError, match="changed since it was read"):
             client.apply_actions(
-                _item(zotero_item_payload), PolicyActions(add_tags={"agent/processed"})
+                _item(zotero_item_payload), PolicyActions(add_tags={"jevero/processed"})
             )
 
 
@@ -650,7 +709,7 @@ def test_a_stored_key_is_reused_without_asking_zotero(zotero_item_payload: dict)
         http_client=httpx.Client(transport=httpx.MockTransport(api.handler)),
     ) as client:
         client.apply_actions(
-            _item(zotero_item_payload), PolicyActions(add_tags={"agent/processed"})
+            _item(zotero_item_payload), PolicyActions(add_tags={"jevero/processed"})
         )
 
     assert api.authorize_calls == 0
@@ -682,7 +741,7 @@ def test_a_stale_stored_key_is_replaced_after_a_401(zotero_item_payload: dict):
         http_client=httpx.Client(transport=httpx.MockTransport(api.handler)),
     ) as client:
         client.apply_actions(
-            _item(zotero_item_payload), PolicyActions(add_tags={"agent/processed"})
+            _item(zotero_item_payload), PolicyActions(add_tags={"jevero/processed"})
         )
 
     assert api.authorize_calls == 1

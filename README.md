@@ -11,7 +11,7 @@ title + abstract + metadata
     ↓
 Jev
     ↓
-topic / role / taxonomy-coverage probabilities   (projects deferred)
+topic / kind / taxonomy-coverage probabilities   (projects deferred)
     ↓
 deterministic Python policy
     ↓
@@ -23,7 +23,7 @@ The first version intentionally does **not** summarize papers, parse full PDFs, 
 Its job is classification and routing.
 
 > **Current implementation status.** The classifiable dimensions today are
-> `topics`, `roles`, and `coverage`. The `projects` dimension is designed but
+> `topics`, `kinds`, and `coverage`. The `projects` dimension is designed but
 > **not implemented**: it has been removed from the code and from `config.yaml`,
 > and the design for adding it back lives in
 > [`docs/projects-design.md`](docs/projects-design.md). `config.yaml` rejects a
@@ -65,7 +65,7 @@ The initial implementation should do only the following:
 3. classify each paper with Jev through OpenRouter;
 4. estimate:
    - topic membership,
-   - paper role,
+   - paper kind,
    - taxonomy coverage;
 
    (`project relevance` is designed but deferred; see the status note above.)
@@ -114,7 +114,7 @@ It returns structured probability estimates such as:
     "quarkonium": 0.97,
     "scet": 0.18
   },
-  "roles": {
+  "kinds": {
     "core": 0.84,
     "method": 0.46
   },
@@ -133,11 +133,13 @@ It returns structured probability estimates such as:
 Python applies explicit thresholds:
 
 ```python
-if result.topics["nrqcd"] >= 0.85:
+# Membership floor first (is this topic part of the paper at all?), then the rank
+# cap (which two or three to keep). One number cannot do both jobs.
+if result.topics["nrqcd"] >= config.thresholds.apply_floor:
     add_tag("topic/nrqcd")
 
-if result.coverage["missing-topic"] >= 0.70:
-    add_tag("agent/review/taxonomy-gap")
+if result.coverage["missing-topic"] >= 0.25:
+    add_tag("review/taxonomy-gap")
 ```
 
 Jev never directly mutates Zotero.
@@ -170,7 +172,7 @@ The paper appears relevant to the literature workflow, but none of the current t
 The paper should be marked:
 
 ```text
-agent/review/taxonomy-gap
+review/taxonomy-gap
 ```
 
 and reviewed by a human.
@@ -216,35 +218,40 @@ project/jpsi-ccbar
 project/general-hep
 ```
 
-### Role tags
+### Kind tags
+
+`kind/core` was retired: it asked whether a paper is central to the reader's
+*current work*, which is a `projects` question (still deferred) rather than a
+genre. See `retired_kinds` in `config.yaml`.
 
 ```text
-role/core
-role/theory
-role/method
-role/review
-role/phenomenology
-role/experiment
-role/reference
+kind/theory
+kind/method
+kind/overview
+kind/phenomenology
+kind/experiment
+kind/reference
 ```
 
-### Processing tags
+### Review tags
 
-A paper gets exactly one **state** tag. A paper awaiting a human additionally
-gets one or more **reason** tags, so "show me everything waiting on a human" is
-a single tag query while each reason still forms its own work queue.
+A paper awaiting a human carries one or more **reason** tags, so the single `04
+Review` queue always says why a paper is in it.
 
 ```text
-# state
-agent/processed
-agent/review
-agent/error
+review/ambiguous        # a judgement landed in the review band
+review/coverage         # covered is low: what is this paper?
+review/taxonomy-gap     # in scope, but no configured topic fits
+review/missing-abstract # too little text to judge
+```
 
-# reasons, always attached together with agent/review
-agent/review/ambiguous        # a judgement landed in the review band
-agent/review/coverage         # covered is low: what is this paper?
-agent/review/taxonomy-gap     # in scope, but no configured topic fits
-agent/review/missing-abstract # too little text to judge
+Reasons are tags because you read and filter on them. Everything else the tool
+needs is bookkeeping and lives in Zotero's `extra` field instead, so the tag panel
+stays a list of things you would actually search for:
+
+```text
+jevero-fingerprint: <digest>   # present => judged, with that model/prompt/vocabulary/thresholds
+jevero-error: <why>            # present => the last attempt failed; cleared on success
 ```
 
 Each reason maps to a different next action:
@@ -256,7 +263,7 @@ Each reason maps to a different next action:
 | `taxonomy-gap` | decide whether `config.yaml` needs a new topic |
 | `missing-abstract` | supply metadata, or accept a title-only classification |
 
-Priority may either be classified by Jev later or derived deterministically from project relevance and role:
+Priority may either be classified by Jev later or derived deterministically from project relevance and kind:
 
 ```text
 priority/read-now
@@ -361,7 +368,7 @@ topics:
 #       Papers of broader methodological relevance to perturbative QCD,
 #       amplitudes, EFT, heavy-flavor physics, or computational HEP.
 #
-roles:
+kinds:
   - core
   - theory
   - method
@@ -376,14 +383,39 @@ coverage:
   - irrelevant
 
 thresholds:
-  topic_apply: 0.85
-  # project_apply: 0.85  # deferred with the projects dimension
-  role_apply: 0.85
+  # Membership floor, then the per-dimension rank cap. Calibrated into the empty
+  # valley of the judgement distribution: measured over 319 topic judgements, only
+  # 3 lie within +/-0.05 of 0.60, against 12 at the old 0.85 cut-off, while
+  # run-to-run noise reaches 0.05. The tag sets at 0.60, 0.65 and 0.70 were
+  # identical, which is the plateau a well-placed floor should have.
+  apply_floor: 0.60
+  # Guaranteed band: at or above this a topic is applied whatever the cap says, so
+  # a paper with several headline topics cannot lose one to a counting rule.
+  topic_guaranteed: 0.95
+  # Kinds are stricter than the shared floor: "what sort of paper is this" hedges
+  # more, so at 0.60 a kind tag could appear and vanish between two runs of the
+  # same configuration. 0.70 measured 0/29 churn.
+  kind_floor: 0.70
+  topic_max: 3
+  kind_max: 2
 
   review: 0.55
-  missing_topic_review: 0.70
+  missing_topic_review: 0.25
   irrelevant: 0.80
   covered_apply: 0.70
+
+# Words dropped from the vocabulary: their tags are removed on the next run and
+# never added back. A name that is neither configured nor retired is treated as
+# yours, and is never removed or routed.
+retired_topics:
+  - perturbative-qcd
+retired_kinds:
+  - core
+
+# Whole namespaces that were renamed; every tag under them is cleared once.
+retired_prefixes:
+  - "role/"
+  - "agent/"
 ```
 
 These values are starting points, not final truth.
@@ -403,7 +435,7 @@ paper
   ↓
 coverage.missing-topic is high
   ↓
-agent/review/taxonomy-gap
+review/taxonomy-gap
   ↓
 human review
 ```
@@ -414,7 +446,7 @@ For example:
 
 ```text
 paper A ─┐
-paper B ─┼─→ agent/review/taxonomy-gap ─→ recurring lattice-QCD theme
+paper B ─┼─→ review/taxonomy-gap ─→ recurring lattice-QCD theme
 paper C ─┘
 ```
 
@@ -629,9 +661,9 @@ jevero route --apply --prune         # also drop memberships the tags no longer 
 ```yaml
 collections:
   topics_parent: "02 Topics"      # topic/<name> -> 02 Topics/<name>
-  roles_parent: "03 Roles"        # role/<name>  -> 03 Roles/<name>
-  review_collection: "04 Review"  # every agent/review* -> one queue
-  route_roles: true
+  kinds_parent: "03 Kinds"        # kind/<name>  -> 03 Kinds/<name>
+  review_collection: "04 Review"  # every review* -> one queue
+  route_kinds: true
   remove_from_inbox: false        # true keeps the inbox a real work queue
 ```
 
@@ -641,28 +673,39 @@ about are never dropped. A paper in review is filed in its topic collection
 *and* the review queue.
 
 `--prune` makes routing converge: a paper is removed from the managed
-collections (`topics_parent/*`, `roles_parent/*`, the review queue) that its
+collections (`topics_parent/*`, `kinds_parent/*`, the review queue) that its
 tags no longer point at. Anything outside those namespaces — your own folders —
 is never touched. Without `--prune`, routing only ever adds.
 
 ### Reclassification converges
 
-A re-run replaces the state instead of accumulating it. `agent/processed`,
-`agent/review`, `agent/error` and the review reasons are one mutually exclusive
-namespace: a plan also removes the state tags it does not ask for, so a paper
-processed under an older rule loses the tags that rule produced. Running twice
-changes nothing the second time.
+A re-run replaces the judgement instead of accumulating it. `topic/*`, `kind/*`
+and the `jevero/*` state are **machine-owned**: a plan states what these
+namespaces should contain and removes the names it does not ask for, so a paper
+processed under an older vocabulary or threshold set loses the tags that
+produced. Running twice changes nothing the second time — measured on a 29-paper
+library, zero papers change their tags.
 
-`topic/*` and `role/*` stay add-only: you may have added them by hand, and the
-model's probabilities drift by a few hundredths between runs, so removing them
-would delete your intent and flap.
+Only names the tool knows are ever removed: the configured vocabulary plus
+anything listed under `retired_topics` / `retired_kinds`. A `topic/...` tag you
+typed yourself is neither, so it survives untouched (`route` reports it instead
+of turning it into a collection).
 
-To make an already-tagged paper follow a new rule, include it explicitly:
+Every judged paper records a stamp in Zotero's `extra` field:
+`jevero-fingerprint: <digest>` — a digest of the model, the prompt text, the
+taxonomy descriptions, and the thresholds that produced its tags. It is not a tag,
+so nothing cryptic shows up in the tag panel. A paper whose stamp differs from the
+current one was judged by an older configuration, and the next run re-judges it
+without being asked.
 
 ```bash
-jevero process --apply --include-processed --limit 1
-jevero route --apply --prune
+jevero check                      # how many papers are out of date
+jevero process --apply            # inbox + everything stale, then convergence
+jevero route --apply --prune      # collections follow the tags
 ```
+
+`--include-processed` still forces a re-run of papers that are already up to
+date.
 
 ### Wider scopes need a confirmation
 
@@ -735,15 +778,21 @@ The intended workflow is to maintain a Zotero collection such as:
 00 Inbox
 ```
 
-The processor should operate on papers that:
+The processor operates on papers that:
 
 ```text
 are in the configured Inbox
-AND
-do not have agent/processed
+OR
+carry no judgement stamp yet (`extra` has no `jevero-fingerprint`)
+OR
+carry a judgement stamp that is not the current one
+   (their tags were produced by older model/prompt/vocabulary/thresholds, and
+    they may live anywhere in the library, not just in the inbox)
 ```
 
-The exact collection lookup mechanism can be configured later.
+`--include-processed` forces a re-run of papers that are already up to date.
+That is why a vocabulary change needs no bookkeeping file: change `config.yaml`,
+run `process`, and exactly the affected papers are re-judged.
 
 A failed paper should remain visible and recoverable.
 
@@ -769,6 +818,7 @@ Example dry-run:
 
 ```text
 [ABCD1234] Energy Correlators in Heavy Quarkonium Production
+  Ada Lovelace · 2019
 
 Topics
   energy-correlator       0.97  APPLY
@@ -776,21 +826,32 @@ Topics
   nrqcd                   0.91  APPLY
   scet                    0.42
 
-Roles
-  core                    0.87  APPLY
-  method                  0.61
+Kinds
+  theory                  0.87  APPLY
+  method                  0.61  APPLY
 
 Coverage
-  covered                 0.96
+  covered                 0.96  >= 0.70
   missing-topic           0.03
   irrelevant              0.01
-
 Planned tags
   + topic/energy-correlator
   + topic/quarkonium
   + topic/nrqcd
-  + role/core
-  + agent/processed
+  + kind/theory
+  + kind/method
+  extra jevero-fingerprint = 9f3c1a77
+  extra jevero-error removed
+```
+
+The run then ends with a vocabulary usage summary, which is what makes a word
+that never fires (or one that fires on almost every paper) visible immediately:
+
+```text
+Vocabulary usage (of 29 papers judged this run)
+  topic/heavy-flavor              0/29   <- never applied
+  topic/energy-correlator        11/29
+  kind/theory                    16/29   <- on most papers; carries little information
 ```
 
 Use dry-run on a representative validation set before enabling automatic writes.
@@ -801,28 +862,37 @@ Use dry-run on a representative validation set before enabling automatic writes.
 
 Classification should be conservative.
 
-A useful starting rule is, per dimension (topics, roles):
+A useful starting rule is, per dimension (topics, kinds):
 
 ```text
-topic p >= 0.85
-    automatically apply
+topic p >= topic_guaranteed (0.95)
+    always applied, whatever the cap says
 
-no topic applied, and the best topic in [0.55, 0.85)
-    the topics are undecided; add agent/review/ambiguous
+word p >= its floor (topics 0.60, kinds 0.70)
+    qualifies; keep the strongest topic_max (3) / kind_max (2), counting the
+    guaranteed ones already selected
 
-no topic applied, and no topic >= 0.55
+no word qualified, and the best topic >= review (0.55)
+    the topics are undecided; add review/ambiguous
+
+no word qualified, and no topic >= 0.55
     ignore
 ```
+
+The floor sits in the empty valley between "not about this" and "this is a topic
+of the paper", so run-to-run noise cannot flip a tag. The rank cap is what keeps
+a paper at two or three topics, and it makes the result independent of how many
+words the vocabulary happens to contain.
 
 Coverage is judged on the paper's **approach**, not on every detail, and uses its
 own gates:
 
 ```text
 missing-topic >= 0.25
-    the approach has no place in the taxonomy; add agent/review/taxonomy-gap
+    the approach has no place in the taxonomy; add review/taxonomy-gap
 
 covered < 0.70
-    coverage is unclear; add agent/review/coverage
+    coverage is unclear; add review/coverage
 
 irrelevant >= 0.80
     out of scope; process without a topic
@@ -838,7 +908,7 @@ Two deliberate restrictions keep this from firing on almost every paper:
 
 - a dimension that already produced an applied tag counts as decided, so a
   second, weaker candidate in the band ("maybe also this") is not reported;
-- **roles never gate review.** Roles are facets, so "no confident role" is a
+- **kinds never gate review.** Kinds are facets, so "no confident kind" is a
   normal outcome — it still produces tags, it just does not decide whether a
   human is needed.
 
@@ -846,13 +916,13 @@ Coverage uses separate thresholds:
 
 ```text
 missing-topic >= 0.70
-    → agent/review/taxonomy-gap
+    → review/taxonomy-gap
 
 irrelevant >= 0.80
     → process without assigning a topic
 
 covered < 0.70
-    → agent/review/coverage
+    → review/coverage
 ```
 
 `covered` is the taxonomy's own adequacy judgement: when it is not convincing,
@@ -875,7 +945,7 @@ Example:
 ```python
 if (
     projects.get("qec", 0.0) >= 0.90
-    and roles.get("core", 0.0) >= 0.80
+    and kinds.get("core", 0.0) >= 0.80
 ):
     priority = "read-now"
 elif max(projects.values(), default=0.0) >= 0.70:
@@ -918,24 +988,22 @@ Title-only results should be marked as lower-confidence input.
 
 ## Processing state
 
-The MVP uses Zotero tags instead of a local database.
-
-Supported state tags:
+There is no local database. State lives in two places, split by audience:
 
 ```text
-agent/processed
-agent/review
-agent/error
+# tags: what you browse and filter on
+topic/<name>
+kind/<name>
+review/ambiguous | review/coverage | review/taxonomy-gap | review/missing-abstract
+
+# extra: what only the tool needs
+jevero-fingerprint: <digest>   # present => judged, with that setup
+jevero-error: <why>            # present => the last attempt failed
 ```
 
-A review state always carries at least one reason tag:
-
-```text
-agent/review/ambiguous
-agent/review/coverage
-agent/review/taxonomy-gap
-agent/review/missing-abstract
-```
+A paper is "judged" when it carries a stamp; a stamp that differs from the current
+one means the judgement is out of date, and the next `process` re-judges it. A
+failure clears the stamp, so the paper returns to "not judged" and is retried.
 
 This keeps the first version simple.
 
@@ -998,7 +1066,7 @@ Load and validate:
 
 ```text
 topics
-roles
+kinds
 coverage
 thresholds
 ```

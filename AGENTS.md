@@ -32,7 +32,7 @@ Jev may estimate semantic probabilities such as:
 
 - topic membership,
 - project relevance (deferred, see "Current Scope" below),
-- paper role,
+- what kind of paper it is,
 - taxonomy coverage.
 
 Jev must not directly decide what to write into Zotero.
@@ -42,7 +42,7 @@ All persistent actions must pass through deterministic Python policy code.
 Example:
 
 ```python
-if result.topics["nrqcd"] >= config.thresholds.topic:
+if result.topics["nrqcd"] >= config.thresholds.apply_floor:
     actions.add_tag("topic/nrqcd")
 ```
 
@@ -103,11 +103,12 @@ The first working version should write namespaced tags such as:
 ```text
 topic/nrqcd
 topic/quarkonium
-role/core
-agent/processed
-agent/review
-agent/error
+kind/theory
+review/taxonomy-gap
 ```
+
+State is not a tag either: whether a paper was judged, and whether the last attempt
+failed, live in Zotero's `extra` field (see "Processing State").
 
 Do not automatically move papers between Zotero collections in the first iteration.
 
@@ -142,7 +143,7 @@ Interpretation:
 If `missing-topic` is sufficiently probable, add:
 
 ```text
-agent/review/taxonomy-gap
+review/taxonomy-gap
 ```
 
 Taxonomy expansion is a human decision.
@@ -156,7 +157,7 @@ Never let Jev invent and persist new topic names automatically.
 The `projects` dimension (per-project usefulness) is **not implemented**. It was removed from the code, from `ClassificationResult`, and from `config.yaml`, and it will be added back later under its own design.
 
 - `config.yaml` must not contain a `projects:` key; unknown keys are rejected rather than ignored.
-- The dimensions that exist today are `topics`, `roles`, and `coverage`.
+- The dimensions that exist today are `topics`, `kinds`, and `coverage`.
 - The design for re-adding projects lives in `docs/projects-design.md`. Do not re-implement it from memory, and do not add it back without an explicit design decision.
 
 The **Zotero Web API is also deferred**. Zotero is read through the desktop local API on `127.0.0.1:23119` only; the Web API client is archived in `archive/zotero_web_api.py`, with restore instructions in `archive/README.md`.
@@ -165,7 +166,7 @@ The **Zotero Web API is also deferred**. Zotero is read through the desktop loca
 - **Writes need Zotero 10 or later.** They use a local API key granted at runtime (`POST /api/local/authorize`) and require `Zotero-Server-ID` on every write. "Always Allow" is mandatory: a single-use key would mean one dialog per paper (such a key is refused). The granted key is stored in `.env` as `ZOTERO_LOCAL_WRITE_KEY` so later runs need no dialog; a key Zotero rejects with `401` is replaced once. Never log the key. Call `ensure_writes_available()` before doing work that assumes writes, so an older Zotero fails fast instead of per paper, and never claim a write succeeded without a 2xx response.
 - Do not put a `ZOTERO_API_KEY` / `ZOTERO_LIBRARY_ID` path back into active code without restoring the archived client deliberately.
 
-`jevero route` projects existing tags onto collection membership: `topic/<name>` -> `<topics_parent>/<name>`, `role/<name>` -> `<roles_parent>/<name>`, and every `agent/review*` paper into one review queue. It never calls the classifier, so it is free to re-run; it merges membership instead of replacing it, so only the inbox is ever removed from; and it creates missing collections. See `docs/collections-design.md`.
+`jevero route` projects existing tags onto collection membership: `topic/<name>` -> `<topics_parent>/<name>`, `kind/<name>` -> `<kinds_parent>/<name>`, and every `review*` paper into one review queue. It never calls the classifier, so it is free to re-run; it merges membership instead of replacing it, so only the inbox is ever removed from; and it creates missing collections. See `docs/collections-design.md`.
 
 ---
 
@@ -253,11 +254,10 @@ topics:
     description: >
       Production, decay, spectroscopy, or structure of heavy quarkonium.
 
-roles:
-  - core
+kinds:
   - theory
   - method
-  - review
+  - overview
   - phenomenology
   - experiment
   - reference
@@ -268,13 +268,43 @@ coverage:
   - irrelevant
 
 thresholds:
-  topic_apply: 0.85
-  role_apply: 0.85
+  # Membership: is this word part of what the paper is? Then focus: how many of
+  # the qualifying words to keep, by rank. Two numbers per dimension, because one
+  # number doing both jobs ends up sitting where the judgements are densest.
+  apply_floor: 0.60
+  # Guaranteed band: at or above this a topic is applied whatever the cap says.
+  topic_guaranteed: 0.95
+  # Kinds are stricter than the shared floor: they hedge more, so 0.60 let a tag
+  # appear and vanish between two runs of the same configuration.
+  kind_floor: 0.70
+  topic_max: 3
+  kind_max: 2
   review: 0.55
   missing_topic_review: 0.25   # calibrated: real gap 0.32 vs highest non-gap 0.16
   irrelevant: 0.80
   covered_apply: 0.70
+
+# Words dropped from the vocabulary. Their tags are removed on the next run and
+# never added back, so retiring a word cleans up after itself. This is also what
+# separates a retired name from a name the reader typed by hand: only known names
+# are ever removed or routed. A word may not be both live and retired.
+retired_topics:
+  - perturbative-qcd
+retired_kinds:
+  - core
+  - review
+
+# Whole namespaces that were renamed or replaced; every tag under them is cleared
+# once.
+retired_prefixes:
+  - "role/"
+  - "agent/"
+  - "jevero/"
 ```
+
+The judgement fingerprint is not a tag: it is recorded in each item's `extra`
+field as `jevero-fingerprint: <digest>`, so machine bookkeeping never clutters the
+tag panel.
 
 Descriptions should be meaningful enough for semantic classification.
 
@@ -308,7 +338,7 @@ For example:
 ```python
 class ClassificationResult(BaseModel):
     topics: dict[str, float]
-    roles: dict[str, float]
+    kinds: dict[str, float]
     coverage: dict[str, float]
 ```
 
@@ -337,7 +367,7 @@ The MVP should not send full PDF text.
 
 The classifier output should contain probabilities only, not prose explanations, unless a short diagnostic explanation is explicitly enabled for debugging.
 
-Prefer one classification request per paper that evaluates all configured topics/roles/coverage states together.
+Prefer one classification request per paper that evaluates all configured topics/kinds/coverage states together.
 
 ---
 
@@ -364,32 +394,39 @@ class PolicyActions(BaseModel):
 Initial policy examples:
 
 ```text
-topic probability >= topic_apply
+topic probability >= apply_floor (strongest first, at most topic_max)
     → add topic/<name>
 
-role probability >= role_apply
-    → add role/<name>
+kind probability >= kind_floor (strongest first, at most kind_max)
+    → add kind/<name>
+
+a configured or retired topic/kind name the plan did not ask for
+    → remove that tag
 
 coverage.missing-topic >= missing_topic_review
-    → add agent/review/taxonomy-gap
+    → add review/taxonomy-gap
 
 coverage.irrelevant >= irrelevant
     → mark processed without adding a topic
 
 coverage.covered < covered_apply
-    → add agent/review/coverage
+    → add review/coverage
 
-topics undecided (nothing >= topic_apply, best >= review)
-    → add agent/review/ambiguous
+topics undecided (nothing >= apply_floor, best >= review)
+    → add review/ambiguous
 
 successful processing
-    → add agent/processed
+    → set extra jevero-fingerprint, clear jevero-error
 
 processing failure
-    → add agent/error
+    → clear jevero-fingerprint, set extra jevero-error
 ```
 
-A review state (`agent/review`) must always be accompanied by at least one reason tag, so that every flagged paper says why it was flagged. The reasons are `agent/review/ambiguous`, `agent/review/coverage`, `agent/review/taxonomy-gap`, and `agent/review/missing-abstract`.
+A flagged paper always carries at least one reason tag, so every paper in the review
+queue says why it is there: `review/ambiguous`, `review/coverage`,
+`review/taxonomy-gap`, or `review/missing-abstract`. Reasons are tags because a human
+reads and filters on them; everything else about the pipeline is bookkeeping and lives
+in `extra`.
 
 Avoid hidden policy inside prompts.
 
@@ -397,37 +434,60 @@ Avoid hidden policy inside prompts.
 
 ## Processing State
 
-For the MVP, use Zotero tags as state markers.
+State is split by audience. Everything a reader would browse or filter on is a tag;
+everything only the tool needs is a line in Zotero's free-text `extra` field, because a
+cryptic tag on 29 papers is noise in the very panel the reader uses.
 
-A paper gets exactly one state tag:
-
-```text
-agent/processed
-agent/review
-agent/error
-```
-
-A paper in the review state additionally gets one or more reason tags:
+Tags, both machine-owned and reconciled on every run:
 
 ```text
-agent/review/ambiguous        # no topic cleared its threshold, but one was plausible
-agent/review/coverage         # covered is low: what is this paper?
-agent/review/taxonomy-gap     # in scope, but no configured topic fits
-agent/review/missing-abstract # too little text to judge
+topic/<name>            # what the paper is about
+kind/<name>             # what sort of paper it is
+review/ambiguous        # no topic cleared the floor, but one was plausible
+review/coverage         # covered is low: what is this paper?
+review/taxonomy-gap     # in scope, but no configured topic fits
+review/missing-abstract # too little text to judge
 ```
 
-State and reason are deliberately separate: `agent/review` answers "does a human need to look?" while the reason selects the queue and names the next action. `agent/error` removes the review state and its reasons, so a failed paper sits in exactly one queue.
+The `review/*` reasons are the human work queue: `jevero route` files every paper
+carrying one into the single `04 Review` collection, and the tag says why.
 
-The `agent/*` namespace is managed as a whole: a plan also emits `remove_tags` for every managed state tag it does not ask for, so reclassifying a paper converges on the current judgement instead of accumulating the union of every rule ever run. `topic/*` and `role/*` stay add-only — a human may have added them and probabilities drift between runs.
+`extra` carries the bookkeeping:
 
-Do not add a local database yet.
+```text
+jevero-fingerprint: <digest>   # present => this paper was judged, with that setup
+jevero-error: <why>            # present => the last attempt failed; cleared on success
+```
 
-Candidate selection should ignore already processed papers unless the user explicitly requests reclassification.
+The fingerprint is a digest over the model, the prompt text, the taxonomy descriptions,
+and the thresholds. That is what makes staleness a query instead of a bookkeeping file:
+a paper whose stamp differs from the current one was judged by an older configuration,
+and the next `process` re-judges it without being asked. A paper with *no* stamp that
+carries an old state tag was judged before stamps existed, so it counts as out of date
+too — otherwise the first run after such a change would silently do nothing. A failure
+clears the stamp and records why, so the paper goes back to "not judged" and is retried
+rather than frozen.
+
+Ownership decides what may be deleted:
+
+- `topic/*` and `kind/*` are **machine-owned**. Every plan states what these namespaces
+  should contain, so a name the plan does not ask for is removed and a re-run converges
+  on the current judgement instead of accumulating the union of every run.
+- Only *known* names are ever removed: the configured vocabulary, plus anything in `retired_topics` / `retired_kinds`. A `topic/...` tag the reader typed by hand is neither, so it survives untouched, and `route` reports it instead of turning it into a collection.
+- Everything outside those namespaces belongs to the reader.
+
+Do not add a local database yet. The vocabulary is versioned by the fingerprint, the
+tags plus `extra` are the state, and the retired lists are the only memory of what used
+to exist.
+
+Candidate selection takes a paper when it has never been judged, when its fingerprint is
+out of date (anywhere in the library: routing is what moves papers out of the inbox), or
+when `--include-processed` asks for a forced re-run.
 
 Reclassification support may later be exposed through a CLI command such as:
 
 ```bash
-jevero reclassify --tag agent/review/taxonomy-gap
+jevero reclassify --tag review/taxonomy-gap
 ```
 
 ---
@@ -465,20 +525,20 @@ Topics
   nrqcd                   0.91
   energy-correlator       0.88
 
-Roles
-  core                    0.86
+Kinds
+  theory                  0.86
 
 Coverage
   covered                 0.96
   missing-topic           0.03
   irrelevant              0.01
-
-Planned actions
+Planned tags
   + topic/quarkonium
   + topic/nrqcd
   + topic/energy-correlator
-  + role/core
-  + agent/processed
+  + kind/theory
+  extra jevero-fingerprint = 9f3c1a77
+  extra jevero-error removed
 ```
 
 Dry-run must not mutate Zotero.
@@ -501,12 +561,12 @@ At minimum distinguish:
 
 Distinguish a failure of the *paper* from a failure of the *environment*:
 
-- `JevResponseError` (malformed answer) is this paper's problem: mark it `agent/error` and carry on.
+- `JevResponseError` (malformed answer) is this paper's problem: clear its stamp, record the failure in `jevero-error`, and carry on.
 - `JevTransportError` (unreachable endpoint) is nobody's paper: abort the run, write nothing, and retry later. The client retries transient transport failures and 429/5xx itself before giving up, honouring `Retry-After`.
 
 A paper that fails processing should remain recoverable.
 
-Prefer adding `agent/error` only when it is safe to do so and when Zotero itself is reachable.
+Prefer recording a failure only when it is safe to do so and when Zotero itself is reachable.
 
 Log enough context to identify the Zotero item key and stage that failed.
 
@@ -523,7 +583,7 @@ For the first version:
 - if an abstract exists, classify normally;
 - if no abstract exists, either skip and mark for review or allow title-only classification behind an explicit configuration option.
 
-Both paths carry `agent/review/missing-abstract`, so thin evidence is always visible in the review queue. Do not silently downgrade title-only results to normal confidence.
+Both paths carry `review/missing-abstract`, so thin evidence is always visible in the review queue. Do not silently downgrade title-only results to normal confidence.
 
 ---
 
@@ -531,7 +591,7 @@ Both paths carry `agent/review/missing-abstract`, so thin evidence is always vis
 
 Taxonomy changes are expected.
 
-When papers repeatedly receive `agent/review/taxonomy-gap`, the human maintainer may decide to add a new topic to `config.yaml`.
+When papers repeatedly receive `review/taxonomy-gap`, the human maintainer may decide to add a new topic to `config.yaml`.
 
 Do not automatically create taxonomy entries.
 
@@ -539,7 +599,7 @@ A useful future workflow is:
 
 ```text
 classify
-→ collect agent/review/taxonomy-gap
+→ collect review/taxonomy-gap
 → human reviews recurring unknown themes
 → edit config.yaml
 → reclassify review queue
@@ -555,7 +615,7 @@ State what a topic covers, including the borderline sub-cases that belong to it.
 That was tried on the real library and it backfired measurably: the model split its
 probability across the two neighbours and cleared neither, so papers that had been
 correctly tagged became untagged. Examples from one run: a generalized-detector paper
-fell from `energy-correlator` 0.95 to 0.75 with `jet` 0.13 (tagged -> `ambiguous`),
+fell from `energy-correlator` 0.95 to 0.75 with `jet` 0.13 (tagged → `ambiguous`),
 `scet` on an energy-correlator paper fell from 0.72 to 0.13, and two dihadron
 fragmentation papers lost `fragmentation` after a "not TMD fragmentation" clause was
 added. Rewriting the same descriptions as positive enumerations restored every one of
@@ -564,9 +624,21 @@ those judgements without touching the threshold.
 One topic per axis. A topic that the model applies to every paper, or to none, carries
 no information: on this library `perturbative-qcd`, `collider-phenomenology`,
 `experiment`, `amplitudes`, and `loop-integrals` were applied to 0 of 29 papers (they
-duplicated `roles`, or were implied by a more specific topic), so they were deleted.
-`roles` already carries the activity axis (`theory` / `method` / `phenomenology` /
+duplicated `kinds`, or were implied by a more specific topic), so they were deleted.
+`kinds` already carries the activity axis (`theory` / `method` / `phenomenology` /
 `experiment`); topics should not restate it.
+
+A topic counts as live only if it is applied to something, or is expected to be applied
+as soon as the matching literature arrives. Every run therefore ends with a vocabulary
+usage summary (`applied/total`, with "never applied" and "on most papers" called out),
+so a word that stopped carrying information is visible immediately instead of being
+discovered months later.
+
+Removing a word is a deliberate two-step decision: delete it from the vocabulary, and
+list it under `retired_topics` / `retired_kinds` so the next run removes its tags. A
+word removed from the vocabulary but *not* retired keeps its tags forever and is
+reported as foreign — a name the tool no longer knows about is indistinguishable from
+one the reader typed by hand.
 
 ---
 

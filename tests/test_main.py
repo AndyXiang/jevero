@@ -18,13 +18,15 @@ from jevero.config import Config
 from jevero.jev import JevOutcome, JevResponseError, JevTransportError
 from jevero.main import app
 from jevero.models import PolicyActions, Usage
-from jevero.policy import PROCESSING_STATES
+from jevero.policy import EXTRA_ERROR, EXTRA_FINGERPRINT
 from jevero.zotero import (
     ZoteroClient,
     ZoteroCollection,
     ZoteroError,
     ZoteroItem,
     ZoteroWriteError,
+    merge_extra,
+    merge_tags,
 )
 
 COLLECTION_KEY = "INBOX123"
@@ -54,8 +56,28 @@ ITEM_WITHOUT_ABSTRACT = {
 ITEM_ALREADY_PROCESSED = {
     "key": "ABCD2345",
     "version": 418,
-    "data": {**ITEM["data"], "tags": [{"tag": "agent/processed"}]},
+    "data": {
+        **ITEM["data"],
+        "extra": "jevero-fingerprint: oldstamp",  # judged, but by an older setup
+    },
 }
+
+
+def up_to_date_item(config_path: Path, key: str = "ABCD2345") -> dict:
+    """A processed item whose stamp matches the configuration: nothing to do."""
+    from jevero.config import load_config as _load_config
+    from jevero.jev import fingerprint
+
+    stamp = fingerprint(_load_config(config_path))
+    return {
+        "key": key,
+        "version": 600,
+        "data": {
+            **ITEM["data"],
+            "key": key,
+            "extra": f"jevero-fingerprint: {stamp}",
+        },
+    }
 
 
 class FakeJevClient:
@@ -176,9 +198,14 @@ class FakeZotero:
 
     def apply_actions(self, item: ZoteroItem, actions: PolicyActions) -> list[str]:
         self.applied.append(actions)
-        tags = (set(item.tags) | actions.add_tags) - actions.remove_tags
-        self._item["data"]["tags"] = [{"tag": tag} for tag in sorted(tags)]
-        return sorted(tags)
+        row = next(
+            r for r in [self._item, *self._extra] if r["key"] == item.key
+        )
+        tags = merge_tags(item.tags, actions)
+        row["data"]["tags"] = [{"tag": tag} for tag in tags]
+        if actions.extra:
+            row["data"]["extra"] = merge_extra(row["data"].get("extra"), actions.extra)
+        return tags
 
     def __enter__(self) -> FakeZotero:
         return self
@@ -196,7 +223,7 @@ def confidence(config: Config) -> JevOutcome:
 
     answers = {key: {"type": "noul", "noul": 0.05} for key in build_questions(config)}
     answers[question_key("topic", "quarkonium")] = {"type": "noul", "noul": 0.96}
-    answers[question_key("role", "core")] = {"type": "noul", "noul": 0.88}
+    answers[question_key("kind", "core")] = {"type": "noul", "noul": 0.88}
     answers[question_key("coverage", "covered")] = {"type": "noul", "noul": 0.95}
 
     return JevOutcome(
@@ -240,14 +267,11 @@ def test_apply_writes_only_policy_tags(
 
     assert result.exit_code == 0, result.output
     assert len(zotero.applied) == 1
-    assert zotero.applied[0].add_tags == {
-        "agent/processed",
-        "role/core",
-        "topic/quarkonium",
-    }
-    # The plan reports the whole managed state, so a re-run clears any state tag
-    # an older policy left behind instead of accumulating them.
-    assert zotero.applied[0].remove_tags == PROCESSING_STATES - {"agent/processed"}
+    assert zotero.applied[0].add_tags == {"kind/core", "topic/quarkonium"}
+    # The judgement stamp goes to `extra`, out of the tag panel, and any earlier
+    # failure is cleared by this success.
+    assert zotero.applied[0].extra[EXTRA_FINGERPRINT]
+    assert zotero.applied[0].extra[EXTRA_ERROR] is None
 
 
 def test_apply_fails_fast_when_writes_are_unavailable(
@@ -311,12 +335,9 @@ def test_missing_abstract_is_skipped_and_flagged_not_processed(
 
     assert result.exit_code == 0, result.output
     assert "skipped: no abstract" in result.output
-    assert zotero.applied[0].add_tags == {
-        "agent/review",
-        "agent/review/missing-abstract",
-    }
-    # Never marked processed, so the paper is retried once metadata arrives.
-    assert "agent/processed" not in zotero.applied[0].add_tags
+    assert zotero.applied[0].add_tags == {"review/missing-abstract"}
+    # Never stamped, so the paper is retried once metadata arrives.
+    assert zotero.applied[0].extra[EXTRA_FINGERPRINT] is None
 
 
 def test_a_bad_model_answer_marks_only_that_paper(monkeypatch, config_path: Path):
@@ -328,8 +349,9 @@ def test_a_bad_model_answer_marks_only_that_paper(monkeypatch, config_path: Path
 
     assert result.exit_code == 1
     assert "classification failed" in result.output
-    assert zotero.applied[0].add_tags == {"agent/error"}
-    assert "agent/processed" in zotero.applied[0].remove_tags
+    assert zotero.applied[0].add_tags == set()
+    assert zotero.applied[0].extra[EXTRA_FINGERPRINT] is None
+    assert "no answer" in (zotero.applied[0].extra[EXTRA_ERROR] or "")
 
 
 def test_an_unreachable_classifier_aborts_and_marks_nothing(
@@ -350,13 +372,16 @@ def test_an_unreachable_classifier_aborts_and_marks_nothing(
 def test_already_processed_papers_are_skipped(
     monkeypatch, config_path: Path, confidence: JevOutcome
 ):
-    zotero = FakeZotero(ITEM_ALREADY_PROCESSED)
-    wire(monkeypatch, zotero, FakeJevClient(outcome=confidence))
+    """Up to date means nothing to do: no classifier call, no write."""
+    zotero = FakeZotero(up_to_date_item(config_path))
+    jev = FakeJevClient(outcome=confidence)
+    wire(monkeypatch, zotero, jev)
 
     result = CliRunner().invoke(app, ["process", "--config", str(config_path), "--apply"])
 
     assert result.exit_code == 0, result.output
     assert zotero.applied == []
+    assert jev.calls == 0
 
 
 def test_include_processed_reconsiders_them(
@@ -372,6 +397,84 @@ def test_include_processed_reconsiders_them(
 
     assert result.exit_code == 0, result.output
     assert len(zotero.applied) == 1
+
+
+STALE_ITEM = {
+    "key": "EFGH6789",
+    "version": 500,
+    "data": {
+        **ITEM["data"],
+        "key": "EFGH6789",
+        "extra": "jevero-fingerprint: oldstamp",
+        "collections": [],  # routed out of the inbox; staleness must still find it
+    },
+}
+
+#: Judged before fingerprints existed: the old namespace, and no stamp at all.
+UNSTAMPED_ITEM = {
+    "key": "IJKL0123",
+    "version": 502,
+    "data": {
+        **ITEM["data"],
+        "key": "IJKL0123",
+        "tags": [{"tag": "agent/processed"}],
+        "collections": [],
+    },
+}
+
+
+def test_a_processed_paper_without_a_stamp_counts_as_out_of_date(
+    monkeypatch, config_path: Path, confidence: JevOutcome
+):
+    """Otherwise the first run after stamps were introduced would do nothing."""
+    zotero = FakeZotero(ITEM, extra_items=(UNSTAMPED_ITEM,))
+    wire(monkeypatch, zotero, FakeJevClient(outcome=confidence))
+
+    result = CliRunner().invoke(
+        app, ["process", "--config", str(config_path), "--dry-run"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Candidates: 2 papers" in result.output
+    assert "1 of them were judged with another model" in result.output
+
+
+def test_an_out_of_date_paper_is_re_judged_without_asking(
+    monkeypatch, config_path: Path, confidence: JevOutcome
+):
+    """A vocabulary, prompt, or model change reaches the papers it invalidated.
+
+    The stale paper is not in the inbox, which is the point: routing is what moves
+    papers out of the inbox, so an inbox-only scope would never re-judge them.
+    """
+    zotero = FakeZotero(ITEM, extra_items=(STALE_ITEM,))
+    wire(monkeypatch, zotero, FakeJevClient(outcome=confidence))
+
+    result = CliRunner().invoke(
+        app, ["process", "--config", str(config_path), "--dry-run"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Candidates: 2 papers" in result.output
+    assert "1 of them were judged with another model" in result.output
+    assert "was oldstamp" in result.output  # the superseded stamp is shown
+
+
+def test_an_up_to_date_paper_is_left_alone(
+    monkeypatch, config_path: Path, confidence: JevOutcome
+):
+    """No configuration change means nothing to do, and no spend."""
+    zotero = FakeZotero(up_to_date_item(config_path, key="EFGH6789"))
+    jev = FakeJevClient(outcome=confidence)
+    wire(monkeypatch, zotero, jev)
+
+    result = CliRunner().invoke(
+        app, ["process", "--config", str(config_path), "--dry-run"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Candidates: 0 papers" in result.output
+    assert jev.calls == 0
 
 
 def test_collections_command_lists_paths_and_marks_the_configured_one(
@@ -417,11 +520,10 @@ CLASSIFIED_ITEM = {
     "data": {
         **ITEM["data"],
         "tags": [
-            {"tag": "topic/loop-integrals"},
-            {"tag": "agent/processed"},
-            {"tag": "agent/review"},
-            {"tag": "agent/review/ambiguous"},
+            {"tag": "topic/quarkonium"},
+            {"tag": "review/ambiguous"},
         ],
+        "extra": "jevero-fingerprint: abc12345",
         "collections": [COLLECTION_KEY],
     },
 }
@@ -434,7 +536,7 @@ def test_route_dry_run_writes_nothing(monkeypatch, config_path: Path):
     result = CliRunner().invoke(app, ["route", "--config", str(config_path)])
 
     assert result.exit_code == 0, result.output
-    assert "02 Topics/loop-integrals" in result.output
+    assert "02 Topics/quarkonium" in result.output
     assert "04 Review" in result.output
     assert "does not exist yet" in result.output
     assert zotero.created == []
@@ -450,12 +552,12 @@ def test_route_apply_creates_targets_and_files_the_paper(
     result = CliRunner().invoke(app, ["route", "--config", str(config_path), "--apply"])
 
     assert result.exit_code == 0, result.output
-    assert zotero.created == ["02 Topics/loop-integrals", "04 Review"]
+    assert zotero.created == ["02 Topics/quarkonium", "04 Review"]
     assert zotero.membership == [({"KEY00001", "KEY00002"}, set())]
 
 
 def test_route_skips_papers_that_were_never_classified(monkeypatch, config_path: Path):
-    zotero = FakeZotero(ITEM)  # no agent/processed tag
+    zotero = FakeZotero(ITEM)  # never judged: no stamp in `extra`
     wire(monkeypatch, zotero, FakeJevClient())
 
     result = CliRunner().invoke(app, ["route", "--config", str(config_path), "--apply"])
@@ -467,7 +569,7 @@ def test_route_skips_papers_that_were_never_classified(monkeypatch, config_path:
 
 def test_route_does_not_create_what_already_exists(monkeypatch, config_path: Path):
     zotero = FakeZotero(CLASSIFIED_ITEM)
-    zotero._paths = {"02 Topics/loop-integrals": "EXIST111", "04 Review": "EXIST222"}
+    zotero._paths = {"02 Topics/quarkonium": "EXIST111", "04 Review": "EXIST222"}
     wire(monkeypatch, zotero, FakeJevClient())
 
     result = CliRunner().invoke(app, ["route", "--config", str(config_path), "--apply"])
@@ -509,7 +611,7 @@ def test_route_prune_drops_managed_membership_the_tags_no_longer_point_at(
     """Convergence: the review tag is gone, so 04 Review must go too."""
     zotero = FakeZotero(CLASSIFIED_WITHOUT_REVIEW)
     zotero._paths = {
-        "02 Topics/loop-integrals": "TOPIC111",
+        "02 Topics/quarkonium": "TOPIC111",
         "04 Review": "REVIEW11",
     }
     zotero._item["data"]["collections"] = [COLLECTION_KEY, "REVIEW11"]
@@ -529,7 +631,7 @@ def test_route_prune_never_touches_collections_we_do_not_manage(
     """A folder the reader made by hand must survive pruning."""
     zotero = FakeZotero(CLASSIFIED_WITHOUT_REVIEW)
     zotero._paths = {
-        "02 Topics/loop-integrals": "TOPIC111",
+        "02 Topics/quarkonium": "TOPIC111",
         "04 Review": "REVIEW11",
         "01 Projects/AmpNet": "MINE0001",
     }
@@ -551,7 +653,7 @@ def test_route_without_prune_keeps_stale_membership(
     monkeypatch, config_path: Path
 ):
     zotero = FakeZotero(CLASSIFIED_WITHOUT_REVIEW)
-    zotero._paths = {"02 Topics/loop-integrals": "TOPIC111", "04 Review": "REVIEW11"}
+    zotero._paths = {"02 Topics/quarkonium": "TOPIC111", "04 Review": "REVIEW11"}
     zotero._item["data"]["collections"] = [COLLECTION_KEY, "REVIEW11"]
     wire(monkeypatch, zotero, FakeJevClient())
 
@@ -570,7 +672,7 @@ def test_route_prune_dry_run_shows_the_removal_but_writes_nothing(
     monkeypatch, config_path: Path
 ):
     zotero = FakeZotero(CLASSIFIED_WITHOUT_REVIEW)
-    zotero._paths = {"02 Topics/loop-integrals": "TOPIC111", "04 Review": "REVIEW11"}
+    zotero._paths = {"02 Topics/quarkonium": "TOPIC111", "04 Review": "REVIEW11"}
     zotero._item["data"]["collections"] = [COLLECTION_KEY, "REVIEW11"]
     wire(monkeypatch, zotero, FakeJevClient())
 
@@ -589,7 +691,8 @@ CLASSIFIED_WITHOUT_REVIEW = {
     "version": 420,
     "data": {
         **ITEM["data"],
-        "tags": [{"tag": "topic/loop-integrals"}, {"tag": "agent/processed"}],
+        "tags": [{"tag": "topic/quarkonium"}],
+        "extra": "jevero-fingerprint: abc12345",
         "collections": [COLLECTION_KEY],
     },
 }
@@ -770,7 +873,7 @@ def test_run_classifies_then_files(monkeypatch, config_path: Path, confidence: J
     assert len(zotero.applied) == 1
     assert "topic/quarkonium" in zotero.applied[0].add_tags
     # ...then filed into the collections its tags point at
-    assert zotero.created == ["02 Topics/quarkonium", "03 Roles/core"]
+    assert zotero.created == ["02 Topics/quarkonium", "03 Kinds/core"]
     assert zotero.membership == [({"KEY00001", "KEY00002"}, set())]
     assert "Filed: 1 routed, 0 unchanged" in result.output
 
@@ -858,9 +961,10 @@ def test_run_writes_by_default_and_dry_run_does_not(
 def test_limit_counts_papers_to_process_not_items_scanned(
     monkeypatch, config_path: Path, confidence: JevOutcome
 ):
-    """An already-processed paper must not eat one of the --limit slots."""
-    zotero = FakeZotero(ITEM_ALREADY_PROCESSED, extra_items=(ITEM,))
-    wire(monkeypatch, zotero, FakeJevClient(outcome=confidence))
+    """An up-to-date paper must not eat one of the --limit slots."""
+    zotero = FakeZotero(up_to_date_item(config_path, key="AAAA0001"), extra_items=(ITEM,))
+    jev = FakeJevClient(outcome=confidence)
+    wire(monkeypatch, zotero, jev)
 
     result = CliRunner().invoke(
         app, ["process", "--config", str(config_path), "--apply", "--limit", "1"]
@@ -868,6 +972,7 @@ def test_limit_counts_papers_to_process_not_items_scanned(
 
     assert result.exit_code == 0, result.output
     assert len(zotero.applied) == 1  # the unprocessed one, not the skipped one
+    assert jev.calls == 1
 
 
 def test_run_never_moves_a_paper_it_could_not_file(
@@ -877,7 +982,7 @@ def test_run_never_moves_a_paper_it_could_not_file(
 
     A previous `_route` walked every inbox item and, with remove_from_inbox on,
     dropped the inbox membership of items it could not file — so an
-    `agent/error` paper silently vanished from the inbox while never landing in
+    failed paper silently vanished from the inbox while never landing in
     a collection.
     """
     moving_config = tmp_path / "config.yaml"
@@ -891,7 +996,7 @@ def test_run_never_moves_a_paper_it_could_not_file(
     result = CliRunner().invoke(app, ["run", "--config", str(moving_config)])
 
     assert result.exit_code == 1  # the paper failed, so the run reports it
-    assert zotero.applied[0].add_tags == {"agent/error"}
+    assert zotero.applied[0].add_tags == set()
     # Nothing was filed, so nothing may have been moved out of the inbox.
     assert zotero.membership == []
     assert "Inbox now holds 1 papers" in result.output
@@ -908,7 +1013,10 @@ def test_route_leaves_unroutable_papers_where_they_are(
     errored = {
         "key": "ABCD2345",
         "version": 420,
-        "data": {**ITEM["data"], "tags": [{"tag": "agent/error"}]},
+        "data": {
+            **ITEM["data"],
+            "extra": "jevero-fingerprint: abc12345\njevero-error: HTTP 500",
+        },
     }
     untagged = {
         "key": "EFGH6789",
@@ -925,3 +1033,36 @@ def test_route_leaves_unroutable_papers_where_they_are(
     assert result.exit_code == 0, result.output
     assert zotero.membership == []
     assert "0 routed, 2 unchanged" in result.output
+
+
+def test_a_paper_judged_before_stamps_still_counts_as_out_of_date(
+    monkeypatch, config_path: Path, confidence: JevOutcome
+):
+    """Otherwise the library that predates fingerprints would look up to date.
+
+    It carries `agent/processed` from the old namespace, and no stamp at all, so
+    without the retired-prefix rule it is neither up to date nor out of date — and
+    the first run after the change would silently do nothing.
+    """
+    legacy = {
+        "key": "LEGACY01",
+        "version": 700,
+        "data": {
+            **ITEM["data"],
+            "key": "LEGACY01",
+            "tags": [{"tag": "agent/processed"}, {"tag": "role/theory"}],
+            "collections": [],
+        },
+    }
+    zotero = FakeZotero(up_to_date_item(config_path, key="AAAA0001"), extra_items=(legacy,))
+    jev = FakeJevClient(outcome=confidence)
+    wire(monkeypatch, zotero, jev)
+
+    result = CliRunner().invoke(
+        app, ["process", "--config", str(config_path), "--dry-run"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Candidates: 1 papers" in result.output
+    assert "1 of them were judged with another model" in result.output
+    assert jev.calls == 1

@@ -24,9 +24,10 @@ def write_config(tmp_path: Path, body: str) -> Path:
 
 def test_loads_a_valid_config(config: Config):
     assert set(config.topics) == {"quarkonium", "nrqcd"}
-    assert set(config.roles) == {"core", "method"}
+    assert set(config.kinds) == {"core", "method"}
     assert set(config.coverage) == {"covered", "missing-topic", "irrelevant"}
-    assert config.thresholds.topic_apply == 0.85
+    assert config.thresholds.apply_floor == 0.60
+    assert config.thresholds.topic_max == 3
     assert config.thresholds.covered_apply == 0.70
     assert config.zotero.base_url == "http://127.0.0.1:23119/api"
     assert config.zotero.inbox_collection == "00 Inbox"
@@ -127,7 +128,7 @@ def test_apply_threshold_must_exceed_review_threshold(tmp_path: Path):
         tmp_path,
         "topics:\n  nrqcd:\n    description: ok\n"
         "coverage: [covered, missing-topic, irrelevant]\n"
-        "thresholds:\n  topic_apply: 0.5\n  review: 0.5\n",
+        "thresholds:\n  apply_floor: 0.5\n  review: 0.5\n",
     )
 
     with pytest.raises(ConfigError, match="greater than"):
@@ -170,37 +171,37 @@ def test_coverage_states_are_required(tmp_path: Path):
         load_config(path)
 
 
-def test_roles_accept_both_list_and_mapping_forms(tmp_path: Path):
+def test_kinds_accept_both_list_and_mapping_forms(tmp_path: Path):
     path = write_config(
         tmp_path,
         "topics:\n  nrqcd:\n    description: ok\n"
-        "roles:\n  - core\n"
+        "kinds:\n  - core\n"
         "coverage: [covered, missing-topic, irrelevant]\n",
     )
     as_list = load_config(path)
-    assert as_list.roles == {"core": ""}
+    assert as_list.kinds == {"core": ""}
 
     path = write_config(
         tmp_path,
         "topics:\n  nrqcd:\n    description: ok\n"
-        "roles:\n  core: Central to a project.\n"
+        "kinds:\n  core: Central to a project.\n"
         "coverage:\n  covered: Fits.\n  missing-topic: Gap.\n  irrelevant: Out.\n",
     )
     as_mapping = load_config(path)
-    assert as_mapping.roles == {"core": "Central to a project."}
+    assert as_mapping.kinds == {"core": "Central to a project."}
     assert as_mapping.coverage["missing-topic"] == "Gap."
 
     # The nested form mirrors how topics and projects are written.
     path = write_config(
         tmp_path,
         "topics:\n  nrqcd:\n    description: ok\n"
-        "roles:\n  core:\n    description: Central to a project.\n"
+        "kinds:\n  core:\n    description: Central to a project.\n"
         "coverage:\n  covered:\n    description: Fits.\n"
         "  missing-topic:\n    description: Gap.\n"
         "  irrelevant:\n    description: Out.\n",
     )
     nested = load_config(path)
-    assert nested.roles == {"core": "Central to a project."}
+    assert nested.kinds == {"core": "Central to a project."}
     assert nested.coverage["irrelevant"] == "Out."
 
 
@@ -274,3 +275,81 @@ def test_write_key_is_read_from_the_environment(monkeypatch: pytest.MonkeyPatch)
 def test_an_empty_write_key_counts_as_absent(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("ZOTERO_LOCAL_WRITE_KEY", "   ")
     assert zotero_write_key() is None
+
+
+def test_retired_words_are_loaded(tmp_path: Path):
+    path = write_config(
+        tmp_path,
+        "topics:\n  nrqcd:\n    description: ok\n"
+        "kinds: [method]\n"
+        "coverage: [covered, missing-topic, irrelevant]\n"
+        "retired_topics: [perturbative-qcd]\n"
+        "retired_kinds: [core]\n",
+    )
+
+    config = load_config(path)
+
+    assert config.retired_topics == frozenset({"perturbative-qcd"})
+    assert config.retired_kinds == frozenset({"core"})
+
+
+def test_a_word_cannot_be_both_live_and_retired(tmp_path: Path):
+    """Otherwise the plan would add and remove the same tag."""
+    path = write_config(
+        tmp_path,
+        "topics:\n  nrqcd:\n    description: ok\n"
+        "coverage: [covered, missing-topic, irrelevant]\n"
+        "retired_topics: [nrqcd]\n",
+    )
+
+    with pytest.raises(ConfigError, match="either in the vocabulary or retired"):
+        load_config(path)
+
+
+def test_retired_names_must_be_tag_safe(tmp_path: Path):
+    path = write_config(
+        tmp_path,
+        "topics:\n  nrqcd:\n    description: ok\n"
+        "coverage: [covered, missing-topic, irrelevant]\n"
+        "retired_topics: [Not Safe]\n",
+    )
+
+    with pytest.raises(ConfigError, match="tag-safe"):
+        load_config(path)
+
+
+def test_topic_guaranteed_must_exceed_the_floor(tmp_path: Path):
+    """Otherwise the guaranteed band swallows the ranked band and the cap is moot."""
+    path = write_config(
+        tmp_path,
+        "topics:\n  nrqcd:\n    description: ok\n"
+        "coverage: [covered, missing-topic, irrelevant]\n"
+        "thresholds:\n  apply_floor: 0.6\n  topic_guaranteed: 0.6\n",
+    )
+
+    with pytest.raises(ConfigError, match="topic_guaranteed"):
+        load_config(path)
+
+
+def test_retired_prefixes_must_be_namespaces(tmp_path: Path):
+    path = write_config(
+        tmp_path,
+        "topics:\n  nrqcd:\n    description: ok\n"
+        "coverage: [covered, missing-topic, irrelevant]\n"
+        "retired_prefixes: [role]\n",
+    )
+
+    with pytest.raises(ConfigError, match="name/"):
+        load_config(path)
+
+
+def test_kind_floor_may_not_be_looser_than_the_shared_floor(tmp_path: Path):
+    path = write_config(
+        tmp_path,
+        "topics:\n  nrqcd:\n    description: ok\n"
+        "coverage: [covered, missing-topic, irrelevant]\n"
+        "thresholds:\n  apply_floor: 0.6\n  kind_floor: 0.5\n",
+    )
+
+    with pytest.raises(ConfigError, match="kind_floor"):
+        load_config(path)

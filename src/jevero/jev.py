@@ -2,7 +2,7 @@
 
 Jev is a *decision* model, not a chat model. It reads a state and answers typed
 questions, returning probabilities rather than prose. One request evaluates
-every configured topic, role, and coverage state for a single paper.
+every configured topic, kind, and coverage state for a single paper.
 
 Verified transport contract (OpenRouter, ``/api/alpha/decisions``)::
 
@@ -35,6 +35,8 @@ directly must not touch ``policy.py`` or ``zotero.py``.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -77,7 +79,7 @@ _COVERAGE_INSTRUCTIONS = {
 }
 
 TOPIC_KIND = "topic"
-ROLE_KIND = "role"
+KIND_QUESTION = "kind"
 COVERAGE_KIND = "coverage"
 
 _INTENDED_SCOPE_FALLBACK = (
@@ -115,6 +117,39 @@ def question_key(kind: str, name: str) -> str:
     return f"{kind}/{name}"
 
 
+#: Task text, sent with every paper. It is a module constant so that the
+#: judgement fingerprint can cover it: editing this text changes every
+#: judgement, and the fingerprint is what makes the affected papers stale.
+_TASK = (
+    "Judge this paper for a personal Zotero literature library. Report "
+    "what the paper appears to be, not what should be done with it.\n"
+    "Be selective about topics: name the two or three that a reader "
+    "browsing the list would need in order to recognise this paper, and "
+    "reserve high probabilities for the most specific of them. When a "
+    "broader topic is already implied by a specific topic you selected, "
+    "give the broader one a low probability instead of letting it ride "
+    "along. Only a genuinely cross-cutting paper should clear several "
+    "topics at once. A topic applies when the paper's own results "
+    "concern it."
+)
+
+#: Bumped whenever the way a judgement is *stored* changes: which namespaces hold
+#: tags, which `extra` lines carry state. The rest of the fingerprint covers the
+#: judgement itself, so without this a storage change would leave the library
+#: looking up to date while its tags no longer match the scheme.
+STORAGE_VERSION = 2
+
+#: How to read the coverage dimension. Part of the judgement fingerprint too.
+_NOTE = (
+    "Coverage is not a topic. Judge it on the paper's subject matter and "
+    "on the approach it is built on - not on every detail: a specific "
+    "technique or observable that sits inside a listed topic is not a "
+    "gap. 'missing-topic' means the paper is built on a whole approach "
+    "that no topic has a place for, so the taxonomy is incomplete; "
+    "'irrelevant' means the paper is outside the intended scope."
+)
+
+
 def build_state(paper: PaperRecord, config: Config) -> dict[str, Any]:
     """Everything the classifier is allowed to see.
 
@@ -122,18 +157,7 @@ def build_state(paper: PaperRecord, config: Config) -> dict[str, Any]:
     instructions about what to write into Zotero.
     """
     return {
-        "task": (
-            "Judge this paper for a personal Zotero literature library. Report "
-            "what the paper appears to be, not what should be done with it.\n"
-            "Be selective about topics: name the two or three that a reader "
-            "browsing the list would need in order to recognise this paper, and "
-            "reserve high probabilities for the most specific of them. When a "
-            "broader topic is already implied by a specific topic you selected, "
-            "give the broader one a low probability instead of letting it ride "
-            "along. Only a genuinely cross-cutting paper should clear several "
-            "topics at once. A topic applies when the paper's own results "
-            "concern it."
-        ),
+        "task": _TASK,
         "paper": {
             "title": paper.title,
             "abstract": paper.abstract,
@@ -145,22 +169,38 @@ def build_state(paper: PaperRecord, config: Config) -> dict[str, Any]:
         "intended_scope": config.classification.scope or _INTENDED_SCOPE_FALLBACK,
         "taxonomy": {
             "topics": {name: entry.description for name, entry in config.topics.items()},
-            "roles": dict(config.roles),
+            "kinds": dict(config.kinds),
         },
         "coverage_states": dict(config.coverage),
-        "note": (
-            "Coverage is not a topic. Judge it on the paper's subject matter and "
-            "on the approach it is built on - not on every detail: a specific "
-            "technique or observable that sits inside a listed topic is not a "
-            "gap. 'missing-topic' means the paper is built on a whole approach "
-            "that no topic has a place for, so the taxonomy is incomplete; "
-            "'irrelevant' means the paper is outside the intended scope."
-        ),
+        "note": _NOTE,
     }
 
 
+def fingerprint(config: Config) -> str:
+    """Short digest of everything that can change a judgement or the tags it yields.
+
+    Covers the model, the prompt text, the taxonomy descriptions, the coverage
+    instructions, and the thresholds — everything except the paper itself. Two
+    runs sharing a fingerprint must produce the same tags, which is what lets a
+    later run select exactly the papers whose judgement is out of date instead of
+    re-classifying the library blindly.
+    """
+    payload = {
+        "storage": STORAGE_VERSION,
+        "model": config.model.name,
+        "task": _TASK,
+        "note": _NOTE,
+        "scope": config.classification.scope,
+        "fallback_scope": _INTENDED_SCOPE_FALLBACK,
+        "questions": build_questions(config),
+        "thresholds": config.thresholds.model_dump(mode="json"),
+    }
+    blob = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:8]
+
+
 def build_questions(config: Config) -> dict[str, dict[str, Any]]:
-    """One question per configured topic, role, and coverage state."""
+    """One question per configured topic, kind, and coverage state."""
     questions: dict[str, dict[str, Any]] = {}
 
     for name, entry in config.topics.items():
@@ -175,12 +215,12 @@ def build_questions(config: Config) -> dict[str, dict[str, Any]]:
             ),
         )
 
-    for name, description in config.roles.items():
-        questions[question_key(ROLE_KIND, name)] = _noul(
-            instructions=f"Does the role '{name}' describe this paper?",
+    for name, description in config.kinds.items():
+        questions[question_key(KIND_QUESTION, name)] = _noul(
+            instructions=f"Does the kind '{name}' describe this paper?",
             true_description=description
-            or f"The paper plays the role '{name}' in a literature workflow.",
-            false_description=f"The paper does not play the role '{name}'.",
+            or f"The paper plays the kind '{name}' in a literature workflow.",
+            false_description=f"The paper does not play the kind '{name}'.",
         )
 
     for name, description in config.coverage.items():
@@ -216,9 +256,9 @@ def parse_answers(answers: Any, config: Config) -> ClassificationResult:
                 name: _probability(answers, question_key(TOPIC_KIND, name))
                 for name in config.topics
             },
-            roles={
-                name: _probability(answers, question_key(ROLE_KIND, name))
-                for name in config.roles
+            kinds={
+                name: _probability(answers, question_key(KIND_QUESTION, name))
+                for name in config.kinds
             },
             coverage={
                 name: _probability(answers, question_key(COVERAGE_KIND, name))

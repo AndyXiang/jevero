@@ -69,18 +69,18 @@
 ```yaml
 collections:
   topics_parent: "02 Topics"      # topic/<name> -> 02 Topics/<name>
-  roles_parent: "03 Roles"        # role/<name>  -> 03 Roles/<name>
-  review_collection: "04 Review"  # 所有 agent/review* 进同一个队列
-  route_roles: true
+  kinds_parent: "03 Kinds"        # kind/<name>  -> 03 Kinds/<name>
+  review_collection: "04 Review"  # 所有 review* 进同一个队列
+  route_kinds: true
   remove_from_inbox: false
 ```
 
 | 字段 | 默认 | 作用 |
 |---|---|---|
 | `topics_parent` | `02 Topics` | `topic/<name>` 的目标父目录 |
-| `roles_parent` | `03 Roles` | `role/<name>` 的目标父目录 |
-| `review_collection` | `04 Review` | 所有 `agent/review*` 的单队列；留空则不作队列 |
-| `route_roles` | `true` | 是否给 role 建目录（关掉就只用标签） |
+| `kinds_parent` | `03 Kinds` | `kind/<name>` 的目标父目录 |
+| `review_collection` | `04 Review` | 所有 `review*` 的单队列；留空则不作队列 |
+| `route_kinds` | `true` | 是否给 kind 建目录（关掉就只用标签） |
 | `remove_from_inbox` | `false` | 路由后是否把论文移出 inbox |
 
 要点：
@@ -91,7 +91,7 @@ collections:
   子目录挂在正确的父目录下。
 - **review 单队列**：四个 reason 都进 `04 Review`——"需要人看"这件事是一样的；
   标签仍然区分 reason，所以队列内部可以按标签过滤。
-- **role 目录默认开启**（最初需求包含 role），`route_roles: false` 一行即可关闭。
+- **kind 目录默认开启**（最初需求包含 kind），`route_kinds: false` 一行即可关闭。
 - 没有 `enabled` 开关、没有 `prune`、没有 `--yes`：命令本身是显式的，且默认 dry-run。
 
 ## 5. 动作语义（确定性）
@@ -113,14 +113,14 @@ def plan_membership(
 判定逻辑（全部可追溯到配置）：
 
 ```text
-如果 collections.enabled 且 agent/processed ∈ tag_actions:
+如果论文带判断指纹（`extra` 里的 `jevero-fingerprint`）:
     对 tags.add_tags 里每个受管标签（在 routes 中且对应维度开关打开）:
         target = 解析后的 key
         if target ∉ current: add(target)
 
-    if agent/review ∈ tag_actions 且 route.review:
+    if review ∈ tag_actions 且 route.review:
         add(review.collection)          # 单队列
-        或 add(routes[f"agent/review/{reason}"])   # per_reason
+        或 add(routes[f"review/{reason}"])   # per_reason
 
     if prune:
         for key in current ∩ 受管目标集合:
@@ -134,7 +134,7 @@ def plan_membership(
 
 要点：
 
-- **`agent/error` 不路由**（失败论文没有可投影的语义）；`agent/processed` 本身也不进 collection——它是状态，不是位置。
+- **失败的论文不路由**（它没有指纹，没有可投影的语义）；“是否判过”是 `extra` 里的记账，不进 collection——它不是位置。
 - review 论文若同时有 topic，则**同时**进 topic collection 和 review 队列（目录是归档，review 是工作队列）。
 - `missing-abstract` 这类没有 topic 的论文只进 review 队列。
 - 一次 `PATCH` 同时带 `tags` 和 `collections`（两个字段都是全量列表）。
@@ -215,7 +215,7 @@ jevero route --apply              # 落地
 | 已有 collection 怎么办 | 不管也不改；按 tag 直接路由，旧粗桶可自行删除 |
 | 手写映射表 | 不要；标签名即目录名 |
 | topic 目录风格 | 按 tag，不用粗桶 |
-| role 要不要目录 | 要（`route_roles: true`），可一行关闭 |
+| kind 要不要目录 | 要（`route_kinds: true`），可一行关闭 |
 | review 队列 | 单队列 `04 Review` |
 | 自动创建 | 要 |
 | CLI | 简洁：`route` 默认 dry-run，`--apply` 才写 |

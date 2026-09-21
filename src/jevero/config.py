@@ -51,12 +51,38 @@ class TaxonomyEntry(BaseModel):
 
 
 class Thresholds(BaseModel):
-    """Probability cut-offs. Every Zotero mutation must trace back to one."""
+    """Where a judgement becomes a tag, and how many tags survive per paper.
+
+    Two numbers per dimension, because they answer different questions: a
+    ``*_max`` cap decides *focus* (which two or three, by rank) while the floor
+    decides *membership* (is this topic part of the paper at all). Using one
+    number for both jobs forced the cut-off into the densest part of the
+    judgement distribution, where a few hundredths of run-to-run noise flipped
+    tags — see ``docs/tag-system-design.md``.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    topic_apply: float = 0.85
-    role_apply: float = 0.85
+    #: Membership floor for topics. Calibrated into the empty valley between "not
+    #: about this" (< 0.6) and "this is a topic of the paper" (>= 0.8): measured
+    #: over 319 topic judgements, only 3 lie within +/-0.05 of it, versus 12 at
+    #: the old 0.85 cut-off. The tag sets produced at 0.60, 0.65 and 0.70 were
+    #: identical on the real library, which is the plateau a well-placed floor
+    #: should have.
+    apply_floor: float = 0.60
+    #: Kinds get their own, stricter floor. "What sort of paper is this" hedges
+    #: more than topic membership does, so kind judgements are dense around 0.6:
+    #: with the shared floor, one kind tag appeared in one run and vanished in the
+    #: next on the same configuration. 0.70 measured 0/29 churn.
+    kind_floor: float = 0.70
+    #: Guaranteed band for topics: at or above this, a topic is applied whatever
+    #: the cap says. It only ever binds when a paper has more than ``topic_max``
+    #: genuinely headline topics, so it is a safety net rather than a filter.
+    topic_guaranteed: float = 0.95
+    #: Focus caps. The guaranteed topics are counted, and the ranked band fills
+    #: whatever the guaranteed band leaves.
+    topic_max: int = Field(default=3, ge=1, le=20)
+    kind_max: int = Field(default=2, ge=1, le=20)
 
     review: float = 0.55
     #: Calibrated for the coverage question's scale; see config.yaml.
@@ -68,19 +94,32 @@ class Thresholds(BaseModel):
 
     @field_validator("*")
     @classmethod
-    def _validate_range(cls, value: float, info) -> float:
+    def _validate_probability_range(cls, value: float, info) -> float:
+        if info.field_name in ("topic_max", "kind_max"):
+            return value  # counts, not probabilities; bounded by their own Field
         if not 0.0 <= float(value) <= 1.0:
             raise ValueError(f"{info.field_name} must lie in [0, 1], got {value!r}")
         return float(value)
 
     @model_validator(mode="after")
     def _validate_ordering(self) -> Thresholds:
-        for name in ("topic_apply", "role_apply"):
-            if getattr(self, name) <= self.review:
-                raise ValueError(
-                    f"{name} ({getattr(self, name)}) must be greater than "
-                    f"review ({self.review}); otherwise the review band is empty"
-                )
+        if self.apply_floor <= self.review:
+            raise ValueError(
+                f"apply_floor ({self.apply_floor}) must be greater than "
+                f"review ({self.review}); otherwise the review band is empty"
+            )
+        if self.topic_guaranteed <= self.apply_floor:
+            raise ValueError(
+                f"topic_guaranteed ({self.topic_guaranteed}) must be greater than "
+                f"apply_floor ({self.apply_floor}); otherwise the ranked band is "
+                "empty and the cap can never order anything"
+            )
+        if self.kind_floor < self.apply_floor:
+            raise ValueError(
+                f"kind_floor ({self.kind_floor}) must not be below apply_floor "
+                f"({self.apply_floor}); a dimension may be stricter than the "
+                "shared floor, never looser"
+            )
         # missing_topic_review is deliberately not compared with `review`: the
         # two measure different things. `review` bounds the per-judgement band,
         # while missing-topic is a calibrated gate on the coverage question
@@ -141,7 +180,7 @@ class CollectionsConfig(BaseModel):
     """Tag-driven Zotero collection routing.
 
     Collections are a projection of the tags: ``topic/<name>`` lands in
-    ``<topics_parent>/<name>`` and ``role/<name>`` in ``<roles_parent>/<name>``.
+    ``<topics_parent>/<name>`` and ``kind/<name>`` in ``<kinds_parent>/<name>``.
     Anything missing is created, because routing by tag only works if the
     target exists.
     """
@@ -149,10 +188,10 @@ class CollectionsConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     topics_parent: str = "02 Topics"
-    roles_parent: str = "03 Roles"
+    kinds_parent: str = "03 Kinds"
     #: All review reasons share one queue unless this is changed.
     review_collection: str = "04 Review"
-    route_roles: bool = True
+    route_kinds: bool = True
     #: Move routed papers out of the inbox, keeping it a real work queue.
     remove_from_inbox: bool = False
 
@@ -172,9 +211,76 @@ class Config(BaseModel):
 
     collections: CollectionsConfig = CollectionsConfig()
     topics: dict[str, TaxonomyEntry]
-    roles: dict[str, str] = Field(default_factory=dict)
+    kinds: dict[str, str] = Field(default_factory=dict)
     coverage: dict[str, str] = Field(default_factory=dict)
     thresholds: Thresholds = Thresholds()
+
+    #: Words dropped from the vocabulary. Their tags are removed from the
+    #: library on the next run and never re-added, so retiring a word cleans up
+    #: after itself instead of leaving tags that no longer mean anything. This
+    #: is also what distinguishes "a name we retired" from "a name the reader
+    #: added by hand": only the former may be deleted.
+    retired_topics: frozenset[str] = frozenset()
+    retired_kinds: frozenset[str] = frozenset()
+
+    #: Whole namespaces that were renamed. Every tag under them is removed on the
+    #: next run, which is how a rename migrates the library instead of leaving the
+    #: old names behind as tags the tool no longer recognises. Keep them until the
+    #: library is clean; an empty namespace is harmless to retire forever.
+    retired_prefixes: frozenset[str] = frozenset()
+
+    @field_validator("retired_prefixes", mode="before")
+    @classmethod
+    def _normalize_retired_prefixes(cls, value: object, info) -> frozenset[str]:
+        if value is None:
+            return frozenset()
+        if not isinstance(value, (list, tuple, set, frozenset)):
+            raise ValueError(
+                f"{info.field_name} must be a list of namespace prefixes, "
+                f"got {type(value).__name__}"
+            )
+        for prefix in value:
+            if (
+                not isinstance(prefix, str)
+                or not prefix.endswith("/")
+                or not _NAME_PATTERN.match(prefix[:-1])
+            ):
+                raise ValueError(
+                    f"{info.field_name} entries must look like 'name/', "
+                    f"got {prefix!r}"
+                )
+        return frozenset(value)
+
+    @field_validator("retired_topics", "retired_kinds", mode="before")
+    @classmethod
+    def _normalize_retired(cls, value: object, info) -> frozenset[str]:
+        if value is None:
+            return frozenset()
+        if not isinstance(value, (list, tuple, set, frozenset)):
+            raise ValueError(
+                f"{info.field_name} must be a list of names, "
+                f"got {type(value).__name__}"
+            )
+        for name in value:
+            if not isinstance(name, str):
+                raise ValueError(f"{info.field_name} entries must be strings")
+            _validate_name(name, info.field_name)
+        return frozenset(value)
+
+    @model_validator(mode="after")
+    def _validate_retired_is_disjoint(self) -> Config:
+        for live_field, retired_field in (
+            ("topics", "retired_topics"),
+            ("kinds", "retired_kinds"),
+        ):
+            both = set(getattr(self, live_field)) & set(getattr(self, retired_field))
+            if both:
+                raise ValueError(
+                    f"{', '.join(sorted(both))} appear in both {live_field} and "
+                    f"{retired_field}; a word is either in the vocabulary or "
+                    f"retired, never both"
+                )
+        return self
 
     @field_validator("topics")
     @classmethod
@@ -187,17 +293,17 @@ class Config(BaseModel):
             _validate_name(name, info.field_name)
         return value
 
-    @field_validator("roles", "coverage", mode="before")
+    @field_validator("kinds", "coverage", mode="before")
     @classmethod
     def _normalize_named(cls, value: object, info) -> dict[str, str]:
         """Accept a list of names, or a mapping of name -> description.
 
         Three shapes are accepted, because all three read well in YAML::
 
-            roles: [core, method]
-            roles:
+            kinds: [core, method]
+            kinds:
               core: Central to the reader's work.
-            roles:
+            kinds:
               core:
                 description: Central to the reader's work.
 

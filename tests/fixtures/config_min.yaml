@@ -19,7 +19,7 @@ topics:
       NRQCD factorization and long-distance matrix elements.
 
 # Deliberately the bare-list form from the design docs, to prove it is accepted.
-roles:
+kinds:
   - core
   - method
 
@@ -29,10 +29,14 @@ coverage:
   - irrelevant
 
 thresholds:
-  topic_apply: 0.85
-  role_apply: 0.85
+  apply_floor: 0.60
+  kind_floor: 0.70
 
   review: 0.55
   missing_topic_review: 0.70
   irrelevant: 0.80
   covered_apply: 0.70
+
+# Mirrors the shipped config: the pre-fingerprint namespaces are being retired.
+retired_prefixes:
+  - "agent/"

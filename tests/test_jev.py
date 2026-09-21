@@ -38,7 +38,7 @@ def complete_answers(config: Config, value: float = 0.9) -> dict:
     answers = {}
     for kind, names in (
         ("topic", config.topics),
-        ("role", config.roles),
+        ("kind", config.kinds),
         ("coverage", config.coverage),
     ):
         for name in names:
@@ -64,8 +64,8 @@ def test_questions_cover_every_configured_entry(config: Config):
     expected = {
         question_key("topic", "quarkonium"),
         question_key("topic", "nrqcd"),
-        question_key("role", "core"),
-        question_key("role", "method"),
+        question_key("kind", "core"),
+        question_key("kind", "method"),
         question_key("coverage", "covered"),
         question_key("coverage", "missing-topic"),
         question_key("coverage", "irrelevant"),
@@ -88,7 +88,7 @@ def test_state_carries_metadata_and_taxonomy_but_no_tag_instructions(
     assert state["intended_scope"] == config.classification.scope
     # The classifier is told what things are, never what to write.
     assert "topic/" not in serialized
-    assert "agent/processed" not in serialized
+    assert "jevero/processed" not in serialized
 
 
 def test_parse_answers_returns_probabilities(config: Config):
@@ -108,7 +108,7 @@ def test_missing_answer_is_rejected(config: Config):
 
 def test_wrong_answer_type_is_rejected(config: Config):
     answers = complete_answers(config)
-    answers[question_key("role", "core")] = {"type": "choice", "choice": "core"}
+    answers[question_key("kind", "core")] = {"type": "choice", "choice": "core"}
 
     with pytest.raises(JevResponseError, match="expected 'noul'"):
         parse_answers(answers, config)
@@ -116,7 +116,7 @@ def test_wrong_answer_type_is_rejected(config: Config):
 
 def test_non_numeric_probability_is_rejected(config: Config):
     answers = complete_answers(config)
-    answers[question_key("role", "core")] = {"type": "noul", "noul": "high"}
+    answers[question_key("kind", "core")] = {"type": "noul", "noul": "high"}
 
     with pytest.raises(JevResponseError, match="must be a number"):
         parse_answers(answers, config)
@@ -302,3 +302,35 @@ def test_topic_questions_ask_about_central_topics(config: Config):
 
     assert "central topics" in instructions
     assert "neighbouring" in instructions
+
+
+def test_fingerprint_covers_everything_that_changes_a_judgement(config: Config):
+    """Staleness is derived from this digest, so it has to be complete.
+
+    A field that changes the judgement or the tags but not the digest would let a
+    paper keep tags from a superseded configuration.
+    """
+    from jevero.config import TaxonomyEntry
+    from jevero.jev import fingerprint
+
+    base = fingerprint(config)
+    assert fingerprint(config) == base  # deterministic
+
+    other_model = config.model_copy(
+        update={"model": config.model.model_copy(update={"name": "typesafe/jev-9.99"})}
+    )
+    other_floor = config.model_copy(
+        update={"thresholds": config.thresholds.model_copy(update={"apply_floor": 0.5})}
+    )
+    other_topics = config.model_copy(
+        update={
+            "topics": {
+                **config.topics,
+                "extra": TaxonomyEntry(description="A brand new topic."),
+            }
+        }
+    )
+
+    assert fingerprint(other_model) != base
+    assert fingerprint(other_floor) != base
+    assert fingerprint(other_topics) != base

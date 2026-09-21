@@ -78,10 +78,10 @@ class ClassificationResult(BaseModel):
     """
 
     topics: dict[str, float]
-    roles: dict[str, float]
+    kinds: dict[str, float]
     coverage: dict[str, float]
 
-    @field_validator("topics", "roles", "coverage")
+    @field_validator("topics", "kinds", "coverage")
     @classmethod
     def _validate_probabilities(cls, value: dict[str, float], info) -> dict[str, float]:
         if not value:
@@ -112,16 +112,35 @@ class PolicyActions(BaseModel):
 
     add_tags: set[str] = Field(default_factory=set)
     remove_tags: set[str] = Field(default_factory=set)
+    #: Tag subtrees the plan owns as a whole, every tag under them being removed
+    #: unless it is re-added. Used for namespaces that were renamed: the
+    #: superseded names cannot be enumerated one by one.
+    remove_tag_prefixes: set[str] = Field(default_factory=set)
+    #: Lines to set in the item's Zotero ``extra`` field, by key; ``None`` removes
+    #: that line. This is where the tool keeps what a reader would never browse by
+    #: — the judgement stamp and the last failure — so the tag panel stays a list
+    #: of things a reader would actually search for.
+    extra: dict[str, str | None] = Field(default_factory=dict)
 
     @property
     def is_empty(self) -> bool:
-        return not self.add_tags and not self.remove_tags
+        return (
+            not self.add_tags
+            and not self.remove_tags
+            and not self.remove_tag_prefixes
+            and not self.extra
+        )
 
     def merge(self, other: PolicyActions) -> PolicyActions:
         """Combine two action sets; additive tags win over removals."""
         add = (self.add_tags | other.add_tags) - other.remove_tags
         remove = (self.remove_tags | other.remove_tags) - add
-        return PolicyActions(add_tags=add, remove_tags=remove)
+        return PolicyActions(
+            add_tags=add,
+            remove_tags=remove,
+            remove_tag_prefixes=self.remove_tag_prefixes | other.remove_tag_prefixes,
+            extra=self.extra | other.extra,
+        )
 
 
 class Usage(BaseModel):

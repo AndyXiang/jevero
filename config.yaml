@@ -30,7 +30,7 @@ classification:
   # A missing abstract is not the same as an irrelevant paper. When false, such
   # papers are skipped and flagged for review. When true, title-only
   # classification runs and its results always carry
-  # agent/review/missing-abstract.
+  # jevero/review/missing-abstract.
   allow_title_only: false
 
   # What belongs in this library at all. This is the evidence behind the
@@ -121,16 +121,38 @@ topics:
       on it: jet, threshold, and endpoint factorization, rapidity
       renormalization, and soft functions.
 
+# Words dropped from the vocabulary. Their tags are removed from the library on
+# the next `process --apply` and never added back, so retiring a word cleans up
+# after itself instead of leaving tags that no longer mean anything. This is also
+# what tells a retired name apart from a name the reader typed by hand: only
+# known names (these, plus the two lists above) are ever deleted or routed.
+retired_topics:
+  - perturbative-qcd        # implied by nrqcd / pnrqcd / scet
+  - collider-phenomenology  # duplicated kind/phenomenology
+  - experiment              # duplicated kind/experiment
+  - amplitudes              # no paper in the library rests on it
+  - loop-integrals          # no paper in the library rests on it
+
+retired_kinds:
+  - core                    # a project-relevance question; belongs to `projects`
+  - review                  # renamed to `overview`: `review` is the human queue
+
+# Whole namespaces that were renamed. Every tag under them is cleared on the next
+# run, which is how the rename migrates the library instead of leaving the old
+# names behind as tags the tool no longer recognises. Harmless to keep, and safe to
+# drop once nothing carries them any more.
+retired_prefixes:
+  - "role/"
+  - "agent/"
+  - "jevero/"
+
+
 # NOTE: a `projects` dimension (per-project usefulness) is designed but not
 # implemented yet. See docs/projects-design.md before adding it back here.
 
-# Roles accept either a plain list of names or a mapping name -> description.
-# Descriptions are used as classification guidance, so prefer the mapping form.
-roles:
-  core:
-    description: >
-      Central to the reader's current work: the paper's main result is directly
-      usable in that line of work.
+# The kind dimension asks what sort of paper this is, independently of what it is
+# about. Descriptions are classification guidance, so the mapping form is preferred.
+kinds:
   theory:
     description: >
       Develops formal theory rather than a reusable tool: new effective field
@@ -140,9 +162,11 @@ roles:
     description: >
       Provides a technique, formalism, or computational method that can be
       applied to other problems.
-  review:
+  overview:
     description: >
       A review, lecture note, or pedagogical overview rather than new results.
+      (Named ``overview`` because ``review`` is the tool's own human-review queue,
+      not a genre.)
   phenomenology:
     description: >
       Connects theory to observable predictions or to experimental data.
@@ -176,29 +200,44 @@ coverage:
 
 collections:
   # Collections are a projection of the tags: topic/<name> lands in
-  # "<topics_parent>/<name>", role/<name> in "<roles_parent>/<name>", and every
-  # agent/review* paper lands in review_collection. Missing collections are
+  # "<topics_parent>/<name>", kind/<name> in "<kinds_parent>/<name>", and every
+  # jevero/review* paper lands in review_collection. Missing collections are
   # created (Zotero 10+ local API). Nothing is ever removed from a collection
   # except the inbox, and only when remove_from_inbox is on.
   # Preview with: jevero route --dry-run
   topics_parent: "02 Topics"
-  roles_parent: "03 Roles"
+  kinds_parent: "03 Kinds"
   review_collection: "04 Review"
-  route_roles: true
+  route_kinds: true
   remove_from_inbox: true
 
 thresholds:
-  # How confident a judgement must be before it becomes a tag.
-  topic_apply: 0.85
-  role_apply: 0.85
+  # Membership: is this word part of what the paper is? Calibrated into the empty
+  # valley of the judgement distribution — measured over 319 topic judgements,
+  # only 3 lie within +/-0.05 of 0.60, against 12 at the old 0.85 cut-off, while
+  # run-to-run noise reaches 0.05. See docs/tag-system-design.md.
+  apply_floor: 0.60
+  # Guaranteed band: at or above this a topic is applied whatever the cap says, so
+  # a paper with several headline topics can never lose one to a counting rule.
+  # It only binds when a paper has more than topic_max of them (measured: no paper
+  # in this library has more than two).
+  topic_guaranteed: 0.95
+  # Kinds get a stricter floor: "what sort of paper is this" hedges more than
+  # topic membership, so with the shared floor one kind tag appeared in one run and
+  # vanished in the next on the same configuration. 0.70 measured 0/29 churn.
+  kind_floor: 0.70
+  # Focus: how many qualifying words to keep, by rank. This is what makes adding
+  # a word to the vocabulary unable to change an existing paper's tags.
+  topic_max: 3
+  kind_max: 2
 
-  # Review band and coverage gates. Every agent/review/... tag traces back to
+  # Review band and coverage gates. Every jevero/review/... tag traces back to
   # exactly one of these comparisons.
   review: 0.55
-  # Calibrated on this library (29 papers, 2026-09): `missing-topic` is asked as
-  # "is the approach one that no topic has any place for", which answers on a
-  # narrower scale than the old wording did. Measured: a paper known to be a gap
-  # (a lattice-QCD paper with no lattice topic) scores 0.32, while the highest
+  # Calibrated on this library (29 papers): `missing-topic` is asked as "is the
+  # approach one that no topic has any place for", which answers on a narrower
+  # scale than the old wording did. Measured: a paper known to be a gap (a
+  # lattice-QCD paper with no lattice topic) scores 0.32, while the highest
   # non-gap scores 0.16. 0.25 sits between them.
   missing_topic_review: 0.25
   irrelevant: 0.80

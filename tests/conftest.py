@@ -39,13 +39,13 @@ def result_factory(config: Config):
     def _make(
         *,
         topics: dict[str, float] | None = None,
-        roles: dict[str, float] | None = None,
+        kinds: dict[str, float] | None = None,
         coverage: dict[str, float] | None = None,
     ) -> ClassificationResult:
         default_coverage = {"covered": 0.9, "missing-topic": 0.05, "irrelevant": 0.05}
         return ClassificationResult(
             topics={name: 0.0 for name in config.topics} | (topics or {}),
-            roles={name: 0.0 for name in config.roles} | (roles or {}),
+            kinds={name: 0.0 for name in config.kinds} | (kinds or {}),
             coverage=default_coverage | (coverage or {}),
         )
 

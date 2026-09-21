@@ -136,6 +136,16 @@ class ZoteroItem:
         raw = self.data.get("tags") or []
         return [str(tag.get("tag", "")) for tag in raw if tag.get("tag")]
 
+    @property
+    def extra(self) -> str:
+        """Zotero's free-text ``extra`` field, as stored."""
+        return str(self.data.get("extra") or "")
+
+    @property
+    def extra_values(self) -> dict[str, str]:
+        """The key/value lines of ``extra``, lowercased keys."""
+        return extra_values(self.extra)
+
     def to_paper(self) -> PaperRecord:
         return normalize_item(self.data)
 
@@ -183,9 +193,57 @@ def merge_tags(existing: list[str], actions: PolicyActions) -> list[str]:
     once writes are enabled.
     """
     tags = {tag for tag in existing if tag}
-    tags |= {tag for tag in actions.add_tags if tag}
     tags -= {tag for tag in actions.remove_tags if tag}
+    prefixes = {prefix for prefix in actions.remove_tag_prefixes if prefix}
+    if prefixes:
+        tags = {tag for tag in tags if not any(tag.startswith(p) for p in prefixes)}
+    # Additions are applied last: a plan clears a renamed namespace and adds the
+    # new names in the same breath, and the new ones must survive that.
+    tags |= {tag for tag in actions.add_tags if tag}
     return sorted(tags)
+
+
+def extra_values(extra: str | None) -> dict[str, str]:
+    """Parse the ``key: value`` lines of Zotero's free-text ``extra`` field.
+
+    Tolerant on purpose: the field is shared with other tools (Zotero writes
+    ``Citation Key:`` there, Better BibTeX writes more), so anything that is not a
+    ``key: value`` line is ignored rather than rejected.
+    """
+    values: dict[str, str] = {}
+    for line in (extra or "").splitlines():
+        text = line.strip()
+        if ":" not in text:
+            continue
+        key, _, value = text.partition(":")
+        key = key.strip().lower()
+        if key and value.strip():
+            values[key] = value.strip()
+    return values
+
+
+def merge_extra(existing: str | None, updates: Mapping[str, str | None]) -> str:
+    """Apply ``key -> value`` updates to ``extra``, preserving every other line.
+
+    ``None`` removes that key. Order is kept for the lines that stay, so the field
+    stays recognisable, and a superseded value is replaced in place rather than
+    appended — otherwise the field would grow by one line per run.
+    """
+    wanted = {key.lower(): value for key, value in updates.items()}
+    lines: list[str] = []
+    for line in (existing or "").splitlines():
+        text = line.strip()
+        key = text.partition(":")[0].strip().lower() if ":" in text else ""
+        if key in wanted:
+            value = wanted.pop(key)
+            if value is not None:
+                lines.append(f"{key}: {value}")
+            continue
+        lines.append(line)
+    for key, value in wanted.items():
+        if value is not None:
+            lines.append(f"{key}: {value}")
+    return "\n".join(lines)
 
 
 def merge_collections(existing: list[str], *, add: set[str], remove: set[str]) -> list[str]:
@@ -428,15 +486,27 @@ class ZoteroClient:
         return key
 
     def apply_actions(self, item: ZoteroItem, actions: PolicyActions) -> list[str]:
-        """Write tags for one item, preserving every unrelated existing tag."""
-        if actions.is_empty:
-            return item.tags
+        """Write tags and the judgement stamp, preserving everything else.
 
+        One PATCH carries both fields, so a paper can never end up with new tags
+        and a stale stamp (or the reverse) because the second request failed.
+        """
         merged = merge_tags(item.tags, actions)
-        if merged == sorted(item.tags):
+        body: dict[str, Any] = {}
+        if merged != sorted(item.tags):
+            body["tags"] = [{"tag": tag} for tag in merged]
+
+        # Bookkeeping lives in `extra`, not in tags: a cryptic tag on every paper
+        # is noise in the tag panel.
+        if actions.extra:
+            extra = merge_extra(item.extra, actions.extra)
+            if extra != item.extra:
+                body["extra"] = extra
+
+        if not body:
             return item.tags
 
-        self._patch_item(item, {"tags": [{"tag": tag} for tag in merged]}, "tags")
+        self._patch_item(item, body, ", ".join(sorted(body)))
         return merged
 
     def apply_membership(
