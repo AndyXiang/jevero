@@ -123,10 +123,16 @@ def build_state(paper: PaperRecord, config: Config) -> dict[str, Any]:
     """
     return {
         "task": (
-            "Judge this paper for a personal Zotero literature library. Answer "
-            "each question independently; a paper may belong to several topics "
-            "at once. Report what the paper appears to be, not what should be "
-            "done with it."
+            "Judge this paper for a personal Zotero literature library. Report "
+            "what the paper appears to be, not what should be done with it.\n"
+            "Be selective about topics: name the two or three that a reader "
+            "browsing the list would need in order to recognise this paper, and "
+            "reserve high probabilities for the most specific of them. When a "
+            "broader topic is already implied by a specific topic you selected, "
+            "give the broader one a low probability instead of letting it ride "
+            "along. Only a genuinely cross-cutting paper should clear several "
+            "topics at once. A topic applies when the paper's own results "
+            "concern it."
         ),
         "paper": {
             "title": paper.title,
@@ -160,8 +166,8 @@ def build_questions(config: Config) -> dict[str, dict[str, Any]]:
     for name, entry in config.topics.items():
         questions[question_key(TOPIC_KIND, name)] = _noul(
             instructions=(
-                f"Does this paper's subject matter fall within the topic "
-                f"'{name}'?"
+                f"Is '{name}' one of the central topics of this paper, rather "
+                f"than a broader or merely neighbouring subject?"
             ),
             true_description=entry.description,
             false_description=(

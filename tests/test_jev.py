@@ -282,3 +282,23 @@ def test_coverage_is_judged_on_aspects_not_only_the_subject(config: Config):
     assert "outside the intended literature scope" in questions[
         question_key("coverage", "irrelevant")
     ]["instructions"]
+
+
+def test_the_task_asks_for_a_selective_topic_choice(config: Config):
+    from jevero.jev import build_state
+
+    state = build_state(
+        PaperRecord(zotero_key="K", title="T", abstract="A"), config
+    )
+    task = state["task"]
+
+    assert "two or three" in task
+    assert "specific" in task
+
+
+def test_topic_questions_ask_about_central_topics(config: Config):
+    questions = build_questions(config)
+    instructions = questions[question_key("topic", "nrqcd")]["instructions"]
+
+    assert "central topics" in instructions
+    assert "neighbouring" in instructions
