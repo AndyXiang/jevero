@@ -104,6 +104,13 @@ topics:
       Experimental measurements, detector-level analyses, and direct
       presentation of collider data.
 
+  lattice-qcd:
+    description: >
+      Lattice gauge theory and lattice QCD: numerical simulation of QCD on a
+      spacetime lattice, hadronic matrix elements and spectra, wave functions
+      and structure of bound states, and other nonperturbative quantities
+      obtained from the lattice.
+
 # NOTE: a `projects` dimension (per-project usefulness) is designed but not
 # implemented yet. See docs/projects-design.md before adding it back here.
 
@@ -141,12 +148,17 @@ roles:
 coverage:
   covered:
     description: >
-      The configured topics adequately describe this paper.
+      Both the paper's subject matter and the approach it is built on are
+      represented by the configured topics. A specific technique, observable, or
+      formalism variant that is not separately named does not break coverage, as
+      long as its approach fits inside a listed topic.
   missing-topic:
     description: >
-      The paper appears relevant to the intended literature scope, but none of
-      the configured topic descriptions fit it well. A human should review
-      whether the taxonomy needs a new topic.
+      The paper is within the intended literature scope and is built on a whole
+      approach - an entire method, framework, or subfield - that no configured
+      topic has any place for: browsing the topic list would leave this paper's
+      approach with nowhere to go. A gap of that size is a human decision, not
+      something to invent here.
   irrelevant:
     description: >
       The paper is outside the intended literature scope and does not justify
@@ -173,6 +185,13 @@ thresholds:
   # Review band and coverage gates. Every agent/review/... tag traces back to
   # exactly one of these comparisons.
   review: 0.55
-  missing_topic_review: 0.70
+  # Calibrated on this library (29 papers, 2026-09): `missing-topic` is asked as
+  # "is the approach one that no topic has any place for", which answers on a
+  # narrower scale than the old wording did. Measured: a paper known to be a gap
+  # (a lattice-QCD paper with no lattice topic) scores 0.32, while the highest
+  # non-gap scores 0.16. 0.25 sits between them.
+  missing_topic_review: 0.25
   irrelevant: 0.80
+  # `covered` is the sensitive signal: that same paper falls from 0.96 to 0.59
+  # without its topic. Measured distribution separates cleanly at 0.45 | 0.79.
   covered_apply: 0.70

@@ -806,6 +806,26 @@ no topic applied, and no topic >= 0.55
     ignore
 ```
 
+Coverage is judged on the paper's **approach**, not on every detail, and uses its
+own gates:
+
+```text
+missing-topic >= 0.25
+    the approach has no place in the taxonomy; add agent/review/taxonomy-gap
+
+covered < 0.70
+    coverage is unclear; add agent/review/coverage
+
+irrelevant >= 0.80
+    out of scope; process without a topic
+```
+
+The 0.25 gate is calibrated, not guessed: a paper known to be a gap (a
+lattice-QCD paper with `lattice-qcd` removed from the taxonomy) scores 0.32,
+while the highest-scoring non-gap scores 0.16. `covered` is the sensitive
+signal — that same paper drops from 0.96 to 0.59 without its topic — so even a
+missed gap still lands in review as `coverage`.
+
 Two deliberate restrictions keep this from firing on almost every paper:
 
 - a dimension that already produced an applied tag counts as decided, so a

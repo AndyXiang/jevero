@@ -267,3 +267,18 @@ def test_network_failure_becomes_a_transport_error(config: Config, paper: PaperR
 def test_api_key_is_required():
     with pytest.raises(JevError, match="API key"):
         JevClient("", model="typesafe/jev-1.13")
+
+
+def test_coverage_is_judged_on_aspects_not_only_the_subject(config: Config):
+    """A topic list that names the subject but no method is not full coverage."""
+    questions = build_questions(config)
+
+    missing = questions[question_key("coverage", "missing-topic")]["instructions"]
+    covered = questions[question_key("coverage", "covered")]["instructions"]
+
+    assert "whole approach" in missing
+    assert "fits inside a topic that is already listed" in missing
+    assert "approach" in covered and "subject matter" in covered
+    assert "outside the intended literature scope" in questions[
+        question_key("coverage", "irrelevant")
+    ]["instructions"]

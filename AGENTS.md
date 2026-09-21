@@ -271,7 +271,7 @@ thresholds:
   topic_apply: 0.85
   role_apply: 0.85
   review: 0.55
-  missing_topic_review: 0.70
+  missing_topic_review: 0.25   # calibrated: real gap 0.32 vs highest non-gap 0.16
   irrelevant: 0.80
   covered_apply: 0.70
 ```

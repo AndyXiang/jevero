@@ -54,6 +54,28 @@ ANSWER_TYPE_NOUL = "noul"
 RETRY_ATTEMPTS = 3
 RETRY_BACKOFF_SECONDS = 1.5
 
+#: Coverage is judged on aspects, not just on the subject: a topic list that
+#: names the paper's subject but none of its methods is not full coverage. Kept
+#: per state so each question asks one thing; unknown states fall back to a
+#: generic phrasing.
+_COVERAGE_INSTRUCTIONS = {
+    "covered": (
+        "Are both the paper's subject matter and the approach it is built on "
+        "represented by the configured topics? Answer yes even if a specific "
+        "technique, observable, or formalism variant it uses is not separately "
+        "named, as long as its approach fits inside a listed topic."
+    ),
+    "missing-topic": (
+        "Is this paper built on a whole approach - an entire method, framework, "
+        "or subfield - that no configured topic has any place for? Answer yes "
+        "when browsing the configured topics would leave this paper's approach "
+        "with nowhere to go. Answer no when the approach fits inside a topic that "
+        "is already listed, even if the paper's particular technique, observable, "
+        "or formalism variant is not named."
+    ),
+    "irrelevant": "Is this paper outside the intended literature scope?",
+}
+
 TOPIC_KIND = "topic"
 ROLE_KIND = "role"
 COVERAGE_KIND = "coverage"
@@ -121,9 +143,12 @@ def build_state(paper: PaperRecord, config: Config) -> dict[str, Any]:
         },
         "coverage_states": dict(config.coverage),
         "note": (
-            "Coverage is not a topic. 'missing-topic' means the paper is in "
-            "scope but no configured topic fits it; 'irrelevant' means it is "
-            "out of scope."
+            "Coverage is not a topic. Judge it on the paper's subject matter and "
+            "on the approach it is built on - not on every detail: a specific "
+            "technique or observable that sits inside a listed topic is not a "
+            "gap. 'missing-topic' means the paper is built on a whole approach "
+            "that no topic has a place for, so the taxonomy is incomplete; "
+            "'irrelevant' means the paper is outside the intended scope."
         ),
     }
 
@@ -154,9 +179,10 @@ def build_questions(config: Config) -> dict[str, dict[str, Any]]:
 
     for name, description in config.coverage.items():
         questions[question_key(COVERAGE_KIND, name)] = _noul(
-            instructions=(
+            instructions=_COVERAGE_INSTRUCTIONS.get(
+                name,
                 f"Does the coverage state '{name}' describe how well the "
-                f"configured topics fit this paper?"
+                f"configured topics cover this paper?",
             ),
             true_description=description
             or f"The coverage state '{name}' applies to this paper.",

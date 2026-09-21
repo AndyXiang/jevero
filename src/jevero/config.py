@@ -59,7 +59,8 @@ class Thresholds(BaseModel):
     role_apply: float = 0.85
 
     review: float = 0.55
-    missing_topic_review: float = 0.70
+    #: Calibrated for the coverage question's scale; see config.yaml.
+    missing_topic_review: float = 0.25
     irrelevant: float = 0.80
     #: How convincing ``coverage.covered`` must be for the taxonomy to count as
     #: adequate. Below it the result is reported for review instead of acted on.
@@ -80,11 +81,11 @@ class Thresholds(BaseModel):
                     f"{name} ({getattr(self, name)}) must be greater than "
                     f"review ({self.review}); otherwise the review band is empty"
                 )
-        if self.missing_topic_review <= self.review:
-            raise ValueError(
-                "missing_topic_review must be greater than review; otherwise "
-                "missing-topic and ambiguity cannot be distinguished"
-            )
+        # missing_topic_review is deliberately not compared with `review`: the
+        # two measure different things. `review` bounds the per-judgement band,
+        # while missing-topic is a calibrated gate on the coverage question
+        # ("is the approach one that no topic has a place for"), which answers on
+        # a narrower scale — see the comment in config.yaml.
         if self.covered_apply <= self.review:
             raise ValueError(
                 "covered_apply must be greater than review; otherwise the "
