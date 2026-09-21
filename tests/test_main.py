@@ -99,6 +99,9 @@ class FakeZotero:
         self.created: list[str] = []
         self.membership: list[tuple[set[str], set[str]]] = []
         self._paths: dict[str, str] = {}
+        # Distinct keys per collection name, so "is this the inbox?" is a real
+        # question rather than an artefact of the fake.
+        self._scope_keys: dict[str, str] = {"00 Inbox": COLLECTION_KEY}
 
     @property
     def supports_write(self) -> bool:
@@ -120,7 +123,7 @@ class FakeZotero:
 
     def find_collection_key(self, name: str) -> str:
         self.read_paths.append(f"collections:{name}")
-        return COLLECTION_KEY
+        return self._scope_keys.setdefault(name, f"SCOPE{len(self._scope_keys):03d}")
 
     def collection_paths(self) -> dict[str, str]:
         return dict(self._paths)
@@ -556,3 +559,130 @@ CLASSIFIED_WITHOUT_REVIEW = {
         "collections": [COLLECTION_KEY],
     },
 }
+
+
+# --------------------------------------------------------------------------- #
+# wider scopes: --collection and --all, and the confirmation they require
+# --------------------------------------------------------------------------- #
+
+
+def test_all_scope_asks_for_confirmation_and_aborts_by_default(
+    monkeypatch, config_path: Path, confidence: JevOutcome
+):
+    zotero = FakeZotero(ITEM)
+    jev = FakeJevClient(outcome=confidence)
+    wire(monkeypatch, zotero, jev)
+
+    result = CliRunner().invoke(
+        app, ["process", "--config", str(config_path), "--all", "--apply"], input="\n"
+    )
+
+    assert result.exit_code == 1
+    assert "WARNING" in result.output
+    assert "the whole library" in result.output
+    assert zotero.applied == []
+    assert jev.calls == 0  # refused before spending anything
+
+
+def test_all_scope_proceeds_when_confirmed(
+    monkeypatch, config_path: Path, confidence: JevOutcome
+):
+    zotero = FakeZotero(ITEM)
+    jev = FakeJevClient(outcome=confidence)
+    wire(monkeypatch, zotero, jev)
+
+    result = CliRunner().invoke(
+        app, ["process", "--config", str(config_path), "--all", "--apply"], input="y\n"
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "WARNING" in result.output
+    assert len(zotero.applied) == 1
+    assert jev.calls == 1
+
+
+def test_collection_scope_also_warns(config_path: Path, monkeypatch, confidence: JevOutcome):
+    zotero = FakeZotero(ITEM)
+    wire(monkeypatch, zotero, FakeJevClient(outcome=confidence))
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "process",
+            "--config",
+            str(config_path),
+            "--collection",
+            "02 Topics/Physics",
+            "--apply",
+        ],
+        input="n\n",
+    )
+
+    assert result.exit_code == 1
+    assert "02 Topics/Physics" in result.output
+    assert zotero.applied == []
+
+
+def test_inbox_scope_never_warns(monkeypatch, config_path: Path, confidence: JevOutcome):
+    zotero = FakeZotero(ITEM)
+    wire(monkeypatch, zotero, FakeJevClient(outcome=confidence))
+
+    result = CliRunner().invoke(
+        app, ["process", "--config", str(config_path), "--apply"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "WARNING" not in result.output
+
+
+def test_dry_run_on_the_whole_library_does_not_ask_anything(
+    monkeypatch, config_path: Path, confidence: JevOutcome
+):
+    zotero = FakeZotero(ITEM)
+    wire(monkeypatch, zotero, FakeJevClient(outcome=confidence))
+
+    result = CliRunner().invoke(
+        app, ["process", "--config", str(config_path), "--all", "--dry-run"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "WARNING" not in result.output
+    assert "the whole library" in result.output
+    assert zotero.applied == []
+
+
+def test_collection_and_all_are_mutually_exclusive(config_path: Path):
+    result = CliRunner().invoke(
+        app,
+        ["process", "--config", str(config_path), "--all", "--collection", "X", "--dry-run"],
+    )
+
+    assert result.exit_code != 0
+
+
+def test_route_all_scope_warns_and_aborts(
+    monkeypatch, config_path: Path
+):
+    zotero = FakeZotero(CLASSIFIED_ITEM)
+    wire(monkeypatch, zotero, FakeJevClient())
+
+    result = CliRunner().invoke(
+        app, ["route", "--config", str(config_path), "--all", "--apply"], input="\n"
+    )
+
+    assert result.exit_code == 1
+    assert "WARNING" in result.output
+    assert zotero.membership == []
+    assert zotero.created == []
+
+
+def test_route_all_scope_applies_when_confirmed(monkeypatch, config_path: Path):
+    zotero = FakeZotero(CLASSIFIED_ITEM)
+    wire(monkeypatch, zotero, FakeJevClient())
+
+    result = CliRunner().invoke(
+        app, ["route", "--config", str(config_path), "--all", "--apply"], input="y\n"
+    )
+
+    assert result.exit_code == 0, result.output
+    assert zotero.membership == [({"KEY00001", "KEY00002"}, set())]

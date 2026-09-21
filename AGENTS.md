@@ -450,6 +450,11 @@ Require an explicit flag for mutations:
 jevero process --apply
 ```
 
+Both `process` and `route` default to the configured inbox. `--collection NAME`
+and `--all` widen the scope; combined with `--apply` they print the scope, the
+number of papers to be written, and block on a `y`/`N` confirmation. A dry-run
+asks nothing, so a wide scope can always be inspected first.
+
 A useful dry-run output is:
 
 ```text

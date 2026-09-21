@@ -101,10 +101,20 @@ def process(
     include_processed: bool = typer.Option(
         False, "--include-processed", help="Reconsider papers already tagged agent/processed."
     ),
+    collection: str | None = typer.Option(
+        None,
+        "--collection",
+        help="Process this collection (name or 'Parent/Child') instead of the inbox.",
+    ),
+    whole_library: bool = typer.Option(
+        False, "--all", help="Process every top-level item in the library."
+    ),
 ) -> None:
-    """Classify papers in the configured Inbox collection."""
+    """Classify papers, by default those in the configured Inbox collection."""
     if apply and dry_run:
         raise typer.BadParameter("--apply and --dry-run are mutually exclusive")
+    if collection and whole_library:
+        raise typer.BadParameter("--collection and --all are mutually exclusive")
     if limit < 0:
         raise typer.BadParameter("--limit must not be negative")
 
@@ -120,6 +130,8 @@ def process(
             mutate=mutate,
             limit=limit or None,
             include_processed=include_processed,
+            collection=collection,
+            whole_library=whole_library,
         )
     except ConfigError as exc:
         typer.secho(f"configuration error: {exc}", fg=typer.colors.RED, err=True)
@@ -212,23 +224,41 @@ def route(
         help="Also drop managed memberships the tags no longer point at.",
     ),
     limit: int = typer.Option(0, "--limit", help="Stop after N papers (0 = no limit)."),
+    collection: str | None = typer.Option(
+        None,
+        "--collection",
+        help="Route this collection (name or 'Parent/Child') instead of the inbox.",
+    ),
+    whole_library: bool = typer.Option(
+        False, "--all", help="Route every top-level item in the library."
+    ),
 ) -> None:
     """File papers into collections based on the tags they already have.
 
-    Only papers directly in the configured inbox are considered, so this never
-    walks the whole library. It never calls the classifier either: it only reads
-    tags and writes collection membership, so re-running it after changing the
-    collection settings is free.
+    By default only papers directly in the configured inbox are considered; use
+    --collection or --all for a wider run, which asks for confirmation before
+    writing. It never calls the classifier either: it only reads tags and writes
+    collection membership, so re-running it after changing the collection
+    settings is free.
     """
     if apply and dry_run:
         raise typer.BadParameter("--apply and --dry-run are mutually exclusive")
+    if collection and whole_library:
+        raise typer.BadParameter("--collection and --all are mutually exclusive")
     mutate = apply
     if not mutate:
         typer.secho("[dry-run] no Zotero changes will be made", fg=typer.colors.YELLOW)
 
     try:
         config = load_config(config_path)
-        summary = _route(config, mutate=mutate, prune=prune, limit=limit or None)
+        summary = _route(
+            config,
+            mutate=mutate,
+            prune=prune,
+            limit=limit or None,
+            collection=collection,
+            whole_library=whole_library,
+        )
     except ConfigError as exc:
         typer.secho(f"configuration error: {exc}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=2) from exc
@@ -309,12 +339,60 @@ def check(
             )
 
 
+def _resolve_scope(
+    zotero: ZoteroClient,
+    config: Config,
+    *,
+    collection: str | None,
+    whole_library: bool,
+) -> tuple[str | None, str]:
+    """Which papers a run may touch, and how to describe that scope."""
+    if whole_library:
+        return None, "the whole library"
+    if collection:
+        return zotero.find_collection_key(collection), f"collection {collection!r}"
+    return (
+        zotero.find_collection_key(config.zotero.inbox_collection),
+        f"inbox {config.zotero.inbox_collection!r}",
+    )
+
+
+def _confirm_wide_scope(label: str, count: int, *, default_scope: bool) -> None:
+    """Make a run outside the inbox an explicit, warned-about decision.
+
+    The inbox is the safe default. Anything wider changes papers the reader did
+    not hand over for this run, so it names the scope, the number of papers and
+    asks for a `y` before writing anything.
+    """
+    if default_scope:
+        return
+    typer.secho("", err=True)
+    typer.secho(
+        f"WARNING: this run will write to {count} papers in {label}, "
+        "not just the inbox.",
+        fg=typer.colors.RED,
+        bold=True,
+        err=True,
+    )
+    typer.secho(
+        "Tags and collection membership are modified for every paper that needs "
+        "a change. Check the dry-run output first.",
+        fg=typer.colors.RED,
+        err=True,
+    )
+    if not typer.confirm("Continue?", default=False):
+        typer.secho("aborted; nothing was changed", err=True)
+        raise typer.Exit(code=1)
+
+
 def _run(
     config: Config,
     *,
     mutate: bool,
     limit: int | None,
     include_processed: bool,
+    collection: str | None,
+    whole_library: bool,
 ) -> RunSummary:
     summary = RunSummary()
     with _zotero_client(config) as zotero:
@@ -329,11 +407,24 @@ def _run(
                 )
             zotero.ensure_writes_available()
 
-        collection_key = zotero.find_collection_key(config.zotero.inbox_collection)
-        typer.echo(
-            f"Inbox {config.zotero.inbox_collection!r} ({collection_key}) "
-            f"via the Zotero local API"
+        scope_key, scope_label = _resolve_scope(
+            zotero, config, collection=collection, whole_library=whole_library
         )
+        candidates = [
+            item
+            for item in zotero.iter_papers(collection_key=scope_key, limit=limit)
+            if include_processed or STATE_PROCESSED not in item.tags
+        ]
+        typer.echo(f"Scope: {scope_label} via the Zotero local API")
+        typer.echo(f"Candidates: {len(candidates)} papers")
+        if mutate:
+            _confirm_wide_scope(
+                scope_label,
+                len(candidates),
+                default_scope=scope_key is not None
+                and scope_key
+                == zotero.find_collection_key(config.zotero.inbox_collection),
+            )
         if mutate:
             typer.secho(
                 'writes need a one-time Zotero confirmation; choose "Always '
@@ -343,9 +434,7 @@ def _run(
             )
 
         with _jev_client(config) as jev:
-            for item in zotero.iter_papers(collection_key=collection_key, limit=limit):
-                if not include_processed and STATE_PROCESSED in item.tags:
-                    continue
+            for item in candidates:
                 _process_one(
                     item, config, zotero=zotero, jev=jev, mutate=mutate, summary=summary
                 )
@@ -353,9 +442,15 @@ def _run(
 
 
 def _route(
-    config: Config, *, mutate: bool, prune: bool, limit: int | None
+    config: Config,
+    *,
+    mutate: bool,
+    prune: bool,
+    limit: int | None,
+    collection: str | None,
+    whole_library: bool,
 ) -> RouteSummary:
-    """File each inbox paper into the collections its tags point at."""
+    """File papers into the collections their tags point at."""
     summary = RouteSummary()
     settings = config.collections
     managed: set[str] = set()
@@ -368,17 +463,23 @@ def _route(
                 for path, key in zotero.collection_paths().items()
                 if is_managed_path(path, config)
             }
-        collection_key = zotero.find_collection_key(config.zotero.inbox_collection)
-        typer.echo(
-            f"Inbox {config.zotero.inbox_collection!r} ({collection_key}) "
-            f"via the Zotero local API"
+        inbox_key = zotero.find_collection_key(config.zotero.inbox_collection)
+        scope_key, scope_label = _resolve_scope(
+            zotero, config, collection=collection, whole_library=whole_library
         )
+        items = list(zotero.iter_papers(collection_key=scope_key, limit=limit))
+        routable = [item for item in items if target_paths(item.tags, config)]
+        typer.echo(f"Scope: {scope_label} via the Zotero local API")
+        typer.echo(f"Candidates: {len(routable)} papers with routable tags")
+        if mutate:
+            _confirm_wide_scope(
+                scope_label,
+                len(routable),
+                default_scope=scope_key is not None and scope_key == inbox_key,
+            )
 
-        for item in zotero.iter_papers(collection_key=collection_key, limit=limit):
+        for item in items:
             paths = target_paths(item.tags, config)
-            if not paths:
-                summary.skipped += 1
-                continue
 
             current = {str(key) for key in (item.data.get("collections") or [])}
             try:
@@ -391,8 +492,8 @@ def _route(
             add = {key for key in resolved.values() if key}
             missing = [path for path, key in resolved.items() if key is None]
             remove = set()
-            if settings.remove_from_inbox and collection_key not in add:
-                remove.add(collection_key)
+            if settings.remove_from_inbox and inbox_key not in add:
+                remove.add(inbox_key)
             if prune:
                 # Converge: managed collections the tags no longer point at are
                 # dropped, so a re-run reflects the current tags exactly.

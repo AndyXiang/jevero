@@ -656,6 +656,32 @@ jevero process --apply --include-processed --limit 1
 jevero route --apply --prune
 ```
 
+### Wider scopes need a confirmation
+
+Both `process` and `route` operate on the configured inbox by default. Two flags
+widen that:
+
+```bash
+jevero process --collection "02 Topics/Physics" --dry-run   # one collection
+jevero route   --all --dry-run                              # the whole library
+```
+
+A dry-run never asks anything — it is how you inspect a wide scope first. When a
+wide scope is combined with `--apply`, the run names the scope and how many
+papers it will write to, and waits for a `y`:
+
+```text
+Scope: the whole library via the Zotero local API
+Candidates: 20 papers with routable tags
+
+WARNING: this run will write to 20 papers in the whole library, not just the inbox.
+Tags and collection membership are modified for every paper that needs a change.
+Continue? [y/N]:
+```
+
+Anything other than `y` aborts without writing. `--collection` and `--all`
+refuse to run together.
+
 ### Writing tags: local API authorization
 
 Writes need **Zotero 10 or later**. Zotero 9 and earlier expose the local API
