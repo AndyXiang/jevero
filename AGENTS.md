@@ -499,6 +499,11 @@ At minimum distinguish:
 - missing abstract,
 - configuration errors.
 
+Distinguish a failure of the *paper* from a failure of the *environment*:
+
+- `JevResponseError` (malformed answer) is this paper's problem: mark it `agent/error` and carry on.
+- `JevTransportError` (unreachable endpoint) is nobody's paper: abort the run, write nothing, and retry later. The client retries transient transport failures and 429/5xx itself before giving up, honouring `Retry-After`.
+
 A paper that fails processing should remain recoverable.
 
 Prefer adding `agent/error` only when it is safe to do so and when Zotero itself is reachable.

@@ -31,10 +31,11 @@ from .config import (
     store_zotero_write_key,
     zotero_write_key,
 )
-from .jev import JevClient, JevError, JevOutcome
+from .jev import JevClient, JevError, JevOutcome, JevTransportError
 from .models import InputMode, PaperRecord, PolicyActions
 from .routing import is_managed_path, target_paths
 from .policy import (
+    REASON_MISSING_ABSTRACT,
     STATE_ERROR,
     STATE_PROCESSED,
     STATE_REVIEW,
@@ -79,6 +80,9 @@ class RunSummary:
     skipped: int = 0
     failed: int = 0
     cost: float = 0.0
+    #: Set when the classifier became unreachable: the run stops, because a
+    #: transport failure says nothing about any individual paper.
+    unavailable: str | None = None
 
 
 @dataclass
@@ -157,6 +161,14 @@ def process(
     )
     if summary.cost:
         typer.echo(f"classifier cost: ${summary.cost:.6f}")
+    if summary.unavailable:
+        typer.secho(
+            f"stopped: the classifier is unreachable ({summary.unavailable}); no "
+            "paper was marked failed, so a re-run retries them",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=2)
     if summary.failed:
         raise typer.Exit(code=1)
 
@@ -207,6 +219,135 @@ def collections(
     except ZoteroError as exc:
         typer.secho(f"Zotero local API: {exc}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=2) from exc
+
+
+@app.command()
+def run(
+    config_path: Path = typer.Option(
+        DEFAULT_CONFIG, "--config", "-c", help="Path to config.yaml."
+    ),
+    apply: bool = typer.Option(
+        False, "--apply", help="Classify and file for real. Without it, nothing changes."
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Explicitly inspect only. This is the default."
+    ),
+    limit: int = typer.Option(0, "--limit", help="Stop after N papers (0 = no limit)."),
+    no_move: bool = typer.Option(
+        False, "--no-move", help="Classify but leave the papers in the inbox."
+    ),
+) -> None:
+    """Classify the inbox, then file each paper where its tags point.
+
+    The one-shot equivalent of ``process --apply`` followed by
+    ``route --apply --prune``, scoped to the configured inbox only.
+
+    Papers that need a human — a missing abstract, or a review flag — stay in the
+    inbox on purpose, so the inbox reads as the remaining work.
+    """
+    if apply and dry_run:
+        raise typer.BadParameter("--apply and --dry-run are mutually exclusive")
+
+    mutate = apply
+    if not mutate:
+        typer.secho("[dry-run] no Zotero changes will be made", fg=typer.colors.YELLOW)
+        typer.secho("          add --apply to classify and file", fg=typer.colors.YELLOW)
+
+    try:
+        config = load_config(config_path)
+        load_environment()
+        summary = _run(
+            config,
+            mutate=mutate,
+            limit=limit or None,
+            include_processed=False,
+            collection=None,
+            whole_library=False,
+        )
+        route_summary = None
+        if mutate and not no_move:
+            route_summary = _route(
+                config,
+                mutate=True,
+                prune=True,
+                limit=None,
+                collection=None,
+                whole_library=False,
+            )
+    except ConfigError as exc:
+        typer.secho(f"configuration error: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2) from exc
+    except (ZoteroError, JevError) as exc:
+        typer.secho(f"error: {exc}", fg=typer.colors.RED, err=True)
+        if isinstance(exc, ZoteroNotFoundError):
+            typer.secho(
+                "    run `jevero collections` to list collection names and paths",
+                fg=typer.colors.YELLOW,
+                err=True,
+            )
+        raise typer.Exit(code=2) from exc
+
+    typer.echo("")
+    typer.echo(
+        f"{summary.processed} processed, {summary.flagged} flagged, "
+        f"{summary.skipped} skipped, {summary.failed} failed"
+    )
+    if summary.cost:
+        typer.echo(f"classifier cost: ${summary.cost:.6f}")
+    if route_summary is not None:
+        typer.echo(
+            f"Filed: {route_summary.routed} routed, {route_summary.skipped} unchanged"
+        )
+    if mutate:
+        _report_inbox_remainder(config)
+    if summary.unavailable:
+        typer.secho(
+            f"stopped before filing: the classifier is unreachable "
+            f"({summary.unavailable})",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    if summary.failed or (route_summary is not None and route_summary.failed):
+        raise typer.Exit(code=1)
+
+
+def _report_inbox_remainder(config: Config) -> None:
+    """Say what is still in the inbox, and why, after a run."""
+    with _zotero_client(config) as zotero:
+        key = zotero.find_collection_key(config.zotero.inbox_collection)
+        items = list(zotero.iter_papers(collection_key=key))
+
+    if not items:
+        typer.secho("Inbox is now empty.", fg=typer.colors.GREEN)
+        return
+
+    unclassified = [item for item in items if STATE_PROCESSED not in item.tags]
+    need_metadata = [
+        item for item in unclassified if REASON_MISSING_ABSTRACT in item.tags
+    ]
+    awaiting = [item for item in unclassified if item not in need_metadata]
+
+    typer.echo(f"Inbox now holds {len(items)} papers:")
+    if not config.collections.remove_from_inbox:
+        kept = len(items) - len(unclassified)
+        if kept:
+            typer.secho(
+                f"  {kept} classified but kept (remove_from_inbox is off)",
+                fg=typer.colors.YELLOW,
+            )
+    if need_metadata:
+        typer.secho(
+            f"  {len(need_metadata)} need metadata (no abstract -> "
+            "agent/review/missing-abstract)",
+            fg=typer.colors.YELLOW,
+        )
+    if awaiting:
+        typer.secho(
+            f"  {len(awaiting)} awaiting review (add abstract? -> see their "
+            "agent/review/* tags)",
+            fg=typer.colors.YELLOW,
+        )
 
 
 @app.command()
@@ -332,7 +473,9 @@ def check(
             )
             if zotero.server_id:
                 typer.secho(
-                    "  local writes: available (--apply will ask for "
+                    "  local writes: available (stored key reused, no dialog)"
+                    if zotero_write_key()
+                    else '  local writes: available (the first write asks for '
                     '"Always Allow" once)',
                     fg=typer.colors.GREEN,
                 )
@@ -424,9 +567,13 @@ def _run(
         )
         candidates = [
             item
-            for item in zotero.iter_papers(collection_key=scope_key, limit=limit)
+            for item in zotero.iter_papers(collection_key=scope_key)
             if include_processed or STATE_PROCESSED not in item.tags
         ]
+        # `--limit` counts papers to process, not items to look at: an
+        # already-processed paper must not eat one of the slots.
+        if limit is not None:
+            candidates = candidates[:limit]
         typer.echo(f"Scope: {scope_label} via the Zotero local API")
         typer.echo(f"Candidates: {len(candidates)} papers")
         if mutate:
@@ -450,6 +597,8 @@ def _run(
                 _process_one(
                     item, config, zotero=zotero, jev=jev, mutate=mutate, summary=summary
                 )
+                if summary.unavailable is not None:
+                    break
     return summary
 
 
@@ -479,8 +628,11 @@ def _route(
         scope_key, scope_label = _resolve_scope(
             zotero, config, collection=collection, whole_library=whole_library
         )
-        items = list(zotero.iter_papers(collection_key=scope_key, limit=limit))
+        items = list(zotero.iter_papers(collection_key=scope_key))
         routable = [item for item in items if target_paths(item.tags, config)]
+        summary.skipped = len(items) - len(routable)
+        if limit is not None:
+            routable = routable[:limit]
         typer.echo(f"Scope: {scope_label} via the Zotero local API")
         typer.echo(f"Candidates: {len(routable)} papers with routable tags")
         if mutate:
@@ -490,9 +642,8 @@ def _route(
                 default_scope=scope_key is not None and scope_key == inbox_key,
             )
 
-        for item in items:
+        for item in routable:
             paths = target_paths(item.tags, config)
-
             current = {str(key) for key in (item.data.get("collections") or [])}
             try:
                 resolved = _resolve_targets(zotero, paths, mutate=mutate)
@@ -582,6 +733,12 @@ def _process_one(
 
     try:
         outcome = jev.classify(paper, config)
+    except JevTransportError as exc:
+        # Not this paper's fault: stop the run and leave every paper untouched,
+        # rather than spraying agent/error over papers that were never judged.
+        typer.secho(f"[{paper.zotero_key}] classifier unreachable: {exc}", fg=typer.colors.RED)
+        summary.unavailable = str(exc)
+        return
     except JevError as exc:
         typer.secho(f"[{paper.zotero_key}] classification failed: {exc}", fg=typer.colors.RED)
         _fail(item, zotero=zotero, mutate=mutate)

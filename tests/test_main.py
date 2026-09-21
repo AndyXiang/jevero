@@ -7,6 +7,7 @@ the fake while the client's own refusal is tested in ``test_zotero.py``.
 
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 
 import pytest
@@ -14,7 +15,7 @@ from typer.testing import CliRunner
 
 from jevero import main as main_module
 from jevero.config import Config
-from jevero.jev import JevOutcome, JevTransportError
+from jevero.jev import JevOutcome, JevResponseError, JevTransportError
 from jevero.main import app
 from jevero.models import PolicyActions, Usage
 from jevero.policy import PROCESSING_STATES
@@ -40,6 +41,7 @@ ITEM = {
         "creators": [{"creatorType": "author", "firstName": "Ada", "lastName": "Lovelace"}],
         "date": "2019",
         "tags": [{"tag": "to-read"}, {"tag": "my own tag"}],
+        "collections": [COLLECTION_KEY],
     },
 }
 
@@ -88,10 +90,14 @@ class FakeZotero:
         self,
         item: dict,
         *,
+        extra_items: tuple[dict, ...] = (),
         supports_write: bool = True,
         writes_available: bool = True,
     ):
-        self._item = item
+        # Deep-copied: the fixtures are module globals, and this fake now
+        # mutates the item when a write happens.
+        self._item = copy.deepcopy(item)
+        self._extra = [copy.deepcopy(other) for other in extra_items]
         self._supports_write = supports_write
         self._writes_available = writes_available
         self.applied: list[PolicyActions] = []
@@ -142,11 +148,21 @@ class FakeZotero:
 
     def apply_membership(self, item, *, add, remove) -> list[str]:
         self.membership.append((set(add), set(remove)))
-        return sorted(set(item.data.get("collections") or []) | add - remove)
+        keys = (set(item.data.get("collections") or []) | add) - remove
+        self._item["data"]["collections"] = sorted(keys)
+        return sorted(keys)
 
     def iter_papers(self, *, collection_key=None, limit=None):
         self.read_paths.append(f"items:{collection_key}")
-        yield self.item
+        yielded = 0
+        for row in [self._item, *self._extra]:
+            membership = row["data"].get("collections") or []
+            if collection_key is not None and collection_key not in membership:
+                continue
+            yield ZoteroItem(key=row["key"], version=row["version"], data=row["data"])
+            yielded += 1
+            if limit is not None and yielded >= limit:
+                return
 
     def get_item(self, key: str) -> ZoteroItem:
         self.read_paths.append(f"item:{key}")
@@ -160,7 +176,9 @@ class FakeZotero:
 
     def apply_actions(self, item: ZoteroItem, actions: PolicyActions) -> list[str]:
         self.applied.append(actions)
-        return sorted(set(item.tags) | actions.add_tags)
+        tags = (set(item.tags) | actions.add_tags) - actions.remove_tags
+        self._item["data"]["tags"] = [{"tag": tag} for tag in sorted(tags)]
+        return sorted(tags)
 
     def __enter__(self) -> FakeZotero:
         return self
@@ -301,9 +319,10 @@ def test_missing_abstract_is_skipped_and_flagged_not_processed(
     assert "agent/processed" not in zotero.applied[0].add_tags
 
 
-def test_classifier_failure_is_reported_and_marked(monkeypatch, config_path: Path):
+def test_a_bad_model_answer_marks_only_that_paper(monkeypatch, config_path: Path):
+    """A malformed answer is this paper's problem, so it is marked and skipped."""
     zotero = FakeZotero(ITEM)
-    wire(monkeypatch, zotero, FakeJevClient(error=JevTransportError("upstream down")))
+    wire(monkeypatch, zotero, FakeJevClient(error=JevResponseError("no answer")))
 
     result = CliRunner().invoke(app, ["process", "--config", str(config_path), "--apply"])
 
@@ -311,6 +330,21 @@ def test_classifier_failure_is_reported_and_marked(monkeypatch, config_path: Pat
     assert "classification failed" in result.output
     assert zotero.applied[0].add_tags == {"agent/error"}
     assert "agent/processed" in zotero.applied[0].remove_tags
+
+
+def test_an_unreachable_classifier_aborts_and_marks_nothing(
+    monkeypatch, config_path: Path
+):
+    """A transport failure says nothing about the paper, so nothing is written."""
+    zotero = FakeZotero(ITEM)
+    wire(monkeypatch, zotero, FakeJevClient(error=JevTransportError("ssl eof")))
+
+    result = CliRunner().invoke(app, ["process", "--config", str(config_path), "--apply"])
+
+    assert result.exit_code == 2
+    assert "classifier unreachable" in result.output
+    assert "no paper was marked failed" in result.output
+    assert zotero.applied == []
 
 
 def test_already_processed_papers_are_skipped(
@@ -705,3 +739,122 @@ def test_a_granted_key_is_written_to_env(monkeypatch, tmp_path: Path):
     assert (tmp_path / ".env").read_text(encoding="utf-8").startswith(
         "ZOTERO_LOCAL_WRITE_KEY=fresh-key"
     )
+
+
+# --------------------------------------------------------------------------- #
+# run: classify the inbox, then file it
+# --------------------------------------------------------------------------- #
+
+
+def test_run_dry_run_writes_nothing(monkeypatch, config_path: Path, confidence: JevOutcome):
+    zotero = FakeZotero(ITEM)
+    wire(monkeypatch, zotero, FakeJevClient(outcome=confidence))
+
+    result = CliRunner().invoke(app, ["run", "--config", str(config_path)])
+
+    assert result.exit_code == 0, result.output
+    assert "add --apply to classify and file" in result.output
+    assert zotero.applied == []
+    assert zotero.created == []
+    assert zotero.membership == []
+
+
+def test_run_classifies_then_files(monkeypatch, config_path: Path, confidence: JevOutcome):
+    zotero = FakeZotero(ITEM)
+    wire(monkeypatch, zotero, FakeJevClient(outcome=confidence))
+
+    result = CliRunner().invoke(app, ["run", "--config", str(config_path), "--apply"])
+
+    assert result.exit_code == 0, result.output
+    # classified...
+    assert len(zotero.applied) == 1
+    assert "topic/quarkonium" in zotero.applied[0].add_tags
+    # ...then filed into the collections its tags point at
+    assert zotero.created == ["02 Topics/quarkonium", "03 Roles/core"]
+    assert zotero.membership == [({"KEY00001", "KEY00002"}, set())]
+    assert "Filed: 1 routed, 0 unchanged" in result.output
+
+
+def test_run_no_move_classifies_only(monkeypatch, config_path: Path, confidence: JevOutcome):
+    zotero = FakeZotero(ITEM)
+    wire(monkeypatch, zotero, FakeJevClient(outcome=confidence))
+
+    result = CliRunner().invoke(
+        app, ["run", "--config", str(config_path), "--apply", "--no-move"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert len(zotero.applied) == 1
+    assert zotero.membership == []
+    assert zotero.created == []
+    assert "classified but kept" in result.output
+
+
+def test_run_reports_papers_that_need_metadata(
+    monkeypatch, config_path: Path, confidence: JevOutcome
+):
+    zotero = FakeZotero(ITEM_WITHOUT_ABSTRACT)
+    jev = FakeJevClient(outcome=confidence)
+    wire(monkeypatch, zotero, jev)
+
+    result = CliRunner().invoke(app, ["run", "--config", str(config_path), "--apply"])
+
+    assert result.exit_code == 0, result.output
+    assert jev.calls == 0  # never classified: no abstract
+    assert "1 skipped" in result.output
+    assert "1 need metadata" in result.output
+    assert zotero.membership == []
+
+
+def test_run_empties_the_inbox_when_configured_to_move(
+    monkeypatch, config_path: Path, tmp_path: Path, confidence: JevOutcome
+):
+    moving_config = tmp_path / "config.yaml"
+    moving_config.write_text(
+        config_path.read_text() + "\ncollections:\n  remove_from_inbox: true\n",
+        encoding="utf-8",
+    )
+    zotero = FakeZotero(ITEM)
+    wire(monkeypatch, zotero, FakeJevClient(outcome=confidence))
+
+    result = CliRunner().invoke(
+        app, ["run", "--config", str(moving_config), "--apply"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert zotero.membership == [({"KEY00001", "KEY00002"}, {COLLECTION_KEY})]
+    assert "Inbox is now empty." in result.output
+
+
+def test_run_does_not_ask_for_confirmation(monkeypatch, config_path: Path, confidence: JevOutcome):
+    """It is inbox-scoped, so the wide-scope warning must not appear."""
+    zotero = FakeZotero(ITEM)
+    wire(monkeypatch, zotero, FakeJevClient(outcome=confidence))
+
+    result = CliRunner().invoke(app, ["run", "--config", str(config_path), "--apply"])
+
+    assert result.exit_code == 0, result.output
+    assert "WARNING" not in result.output
+
+
+def test_run_and_dry_run_flags_are_mutually_exclusive(config_path: Path):
+    result = CliRunner().invoke(
+        app, ["run", "--config", str(config_path), "--apply", "--dry-run"]
+    )
+
+    assert result.exit_code != 0
+
+
+def test_limit_counts_papers_to_process_not_items_scanned(
+    monkeypatch, config_path: Path, confidence: JevOutcome
+):
+    """An already-processed paper must not eat one of the --limit slots."""
+    zotero = FakeZotero(ITEM_ALREADY_PROCESSED, extra_items=(ITEM,))
+    wire(monkeypatch, zotero, FakeJevClient(outcome=confidence))
+
+    result = CliRunner().invoke(
+        app, ["process", "--config", str(config_path), "--apply", "--limit", "1"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert len(zotero.applied) == 1  # the unprocessed one, not the skipped one

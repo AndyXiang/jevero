@@ -46,11 +46,14 @@ def complete_answers(config: Config, value: float = 0.9) -> dict:
     return answers
 
 
-def make_client(handler) -> JevClient:
+def make_client(handler, *, attempts: int = 3) -> JevClient:
+    """A client with real retry behaviour but no sleeping between attempts."""
     return JevClient(
         "test-key",
         model="typesafe/jev-1.13",
         base_url="https://openrouter.ai/api",
+        retry_attempts=attempts,
+        retry_backoff_seconds=0.0,
         http_client=httpx.Client(transport=httpx.MockTransport(handler)),
     )
 
@@ -186,12 +189,70 @@ def test_non_json_response_is_rejected(config: Config, paper: PaperRecord):
 
 
 def test_http_error_becomes_a_transport_error(config: Config, paper: PaperRecord):
+    calls = []
+
     def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
         return httpx.Response(503, text="upstream unavailable")
 
     with make_client(handler) as client:
         with pytest.raises(JevTransportError, match="HTTP 503"):
             client.classify(paper, config)
+
+    assert len(calls) == 3  # a 5xx is transient, so it is retried
+
+
+def test_a_transient_transport_failure_is_retried(config: Config, paper: PaperRecord):
+    """The real outage here was SSL EOF on the first attempt(s)."""
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        if len(calls) < 3:
+            raise httpx.ConnectError("ssl eof", request=request)
+        return httpx.Response(200, json={
+            "id": "gen-1", "model": "m", "provider": "p",
+            "answers": complete_answers(config, 0.9),
+        })
+
+    with make_client(handler) as client:
+        outcome = client.classify(paper, config)
+
+    assert len(calls) == 3
+    assert outcome.result.topics["nrqcd"] == 0.9
+
+
+def test_a_transient_http_error_is_retried(config: Config, paper: PaperRecord):
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        if len(calls) == 1:
+            return httpx.Response(429, headers={"Retry-After": "0"}, text="slow down")
+        return httpx.Response(200, json={
+            "id": "gen-1", "model": "m", "provider": "p",
+            "answers": complete_answers(config, 0.9),
+        })
+
+    with make_client(handler) as client:
+        outcome = client.classify(paper, config)
+
+    assert len(calls) == 2
+    assert outcome.result.topics["nrqcd"] == 0.9
+
+
+def test_a_client_error_is_not_retried(config: Config, paper: PaperRecord):
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(401, text="invalid api key")
+
+    with make_client(handler) as client:
+        with pytest.raises(JevTransportError, match="HTTP 401"):
+            client.classify(paper, config)
+
+    assert len(calls) == 1
 
 
 def test_network_failure_becomes_a_transport_error(config: Config, paper: PaperRecord):

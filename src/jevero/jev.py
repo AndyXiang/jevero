@@ -35,6 +35,7 @@ directly must not touch ``policy.py`` or ``zotero.py``.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -48,6 +49,10 @@ from .models import ClassificationResult, PaperRecord, Usage
 
 DECISIONS_PATH = "/alpha/decisions"
 ANSWER_TYPE_NOUL = "noul"
+
+#: A dropped TLS connection or a transient 5xx should not cost a paper.
+RETRY_ATTEMPTS = 3
+RETRY_BACKOFF_SECONDS = 1.5
 
 TOPIC_KIND = "topic"
 ROLE_KIND = "role"
@@ -202,6 +207,8 @@ class JevClient:
         model: str,
         base_url: str = "https://openrouter.ai/api",
         timeout_seconds: float = 60.0,
+        retry_attempts: int = RETRY_ATTEMPTS,
+        retry_backoff_seconds: float = RETRY_BACKOFF_SECONDS,
         http_client: httpx.Client | None = None,
     ) -> None:
         if not api_key:
@@ -210,6 +217,8 @@ class JevClient:
         self._model = model
         self._endpoint = base_url.rstrip("/") + DECISIONS_PATH
         self._timeout = timeout_seconds
+        self._retry_attempts = max(1, retry_attempts)
+        self._retry_backoff = retry_backoff_seconds
         self._http = http_client or create_client(timeout_seconds)
         self._owns_client = http_client is None
 
@@ -248,20 +257,7 @@ class JevClient:
             "questions": questions,
             "session_id": session_id,
         }
-        try:
-            response = self._http.post(
-                self._endpoint,
-                json=body,
-                headers={
-                    "Authorization": f"Bearer {self._api_key}",
-                    "Content-Type": "application/json",
-                },
-            )
-        except httpx.HTTPError as exc:
-            raise JevTransportError(
-                f"could not reach the Jev endpoint {self._endpoint}: {exc}"
-            ) from exc
-
+        response = self._post(body)
         if response.status_code >= 400:
             raise JevTransportError(
                 f"Jev request failed with HTTP {response.status_code}: "
@@ -277,6 +273,63 @@ class JevClient:
                 f"Jev response must be a JSON object, got {type(payload).__name__}"
             )
         return payload
+
+
+    def _post(self, body: dict[str, Any]) -> httpx.Response:
+        """POST the request, retrying transport blips and transient statuses.
+
+        A dropped connection, a timeout, a 429 or a 5xx says nothing about the
+        paper, so those are retried with backoff; anything else is returned as
+        it is. If every attempt fails to get a response at all, this raises
+        ``JevTransportError``, which the caller reads as "the classifier is
+        unavailable" rather than "this paper is bad".
+        """
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
+        }
+        last_error = "no attempt was made"
+        for attempt in range(1, self._retry_attempts + 1):
+            retry_after: float | None = None
+            try:
+                response = self._http.post(self._endpoint, json=body, headers=headers)
+            except httpx.TransportError as exc:
+                last_error = f"{type(exc).__name__}: {exc}"
+            else:
+                if not _is_transient(response.status_code):
+                    return response
+                last_error = f"HTTP {response.status_code}: {_snippet(response)}"
+                if attempt == self._retry_attempts:
+                    return response
+                retry_after = _retry_after_seconds(response)
+
+            if attempt < self._retry_attempts:
+                delay = (
+                    retry_after
+                    if retry_after is not None
+                    else self._retry_backoff * 2 ** (attempt - 1)
+                )
+                time.sleep(delay)
+
+        raise JevTransportError(
+            f"could not reach the Jev endpoint {self._endpoint} after "
+            f"{self._retry_attempts} attempts ({last_error})"
+        )
+
+
+def _is_transient(status_code: int) -> bool:
+    """Worth retrying: rate limiting, or the gateway/provider failing."""
+    return status_code == 429 or status_code >= 500
+
+
+def _retry_after_seconds(response: httpx.Response) -> float | None:
+    raw = response.headers.get("Retry-After")
+    if not raw:
+        return None
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return None
 
 
 def _noul(*, instructions: str, true_description: str, false_description: str) -> dict[str, Any]:
