@@ -255,6 +255,7 @@ topics:
 
 roles:
   - core
+  - theory
   - method
   - review
   - phenomenology
@@ -378,7 +379,7 @@ coverage.irrelevant >= irrelevant
 coverage.covered < covered_apply
     → add agent/review/coverage
 
-a dimension with nothing applied whose best judgement is in [review, apply)
+topics undecided (nothing >= topic_apply, best >= review)
     → add agent/review/ambiguous
 
 successful processing
@@ -409,7 +410,7 @@ agent/error
 A paper in the review state additionally gets one or more reason tags:
 
 ```text
-agent/review/ambiguous        # a judgement landed in the review band
+agent/review/ambiguous        # no topic cleared its threshold, but one was plausible
 agent/review/coverage         # covered is low: what is this paper?
 agent/review/taxonomy-gap     # in scope, but no configured topic fits
 agent/review/missing-abstract # too little text to judge

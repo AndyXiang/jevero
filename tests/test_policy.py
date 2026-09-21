@@ -126,13 +126,28 @@ def test_a_decided_dimension_does_not_report_its_weaker_candidates(
     assert STATE_REVIEW not in actions.add_tags
 
 
-def test_an_undecided_dimension_is_still_reported(config, result_factory):
-    """Roles resolved nothing here, so the paper is genuinely undecided."""
+def test_roles_do_not_gate_review(config, result_factory):
+    """Roles are facets: "no confident role" is normal, not a reason to report.
+
+    This is the live case of a Feynman-integral paper: the topic was decided at
+    0.89, and every role stayed below role_apply.
+    """
     result = result_factory(topics={"quarkonium": 0.97}, roles={"method": 0.79})
     actions = plan(result, config)
 
     assert "topic/quarkonium" in actions.add_tags
+    assert REASON_AMBIGUOUS not in actions.add_tags
+    assert STATE_REVIEW not in actions.add_tags
+    assert not any(tag.startswith("role/") for tag in actions.add_tags)
+
+
+def test_undecided_topics_are_still_reported(config, result_factory):
+    """A paper with no confident topic is genuinely undecided."""
+    result = result_factory(topics={"quarkonium": 0.61}, roles={"method": 0.99})
+    actions = plan(result, config)
+
     assert REASON_AMBIGUOUS in actions.add_tags
+    assert "role/method" in actions.add_tags
 
 
 def test_unconvincing_covered_is_reported(config, result_factory):

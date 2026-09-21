@@ -218,6 +218,7 @@ project/general-hep
 
 ```text
 role/core
+role/theory
 role/method
 role/review
 role/phenomenology
@@ -354,6 +355,7 @@ topics:
 #
 roles:
   - core
+  - theory
   - method
   - review
   - phenomenology
@@ -736,20 +738,23 @@ Classification should be conservative.
 A useful starting rule is, per dimension (topics, roles):
 
 ```text
-p >= 0.85
+topic p >= 0.85
     automatically apply
 
-nothing applied, and the best candidate in [0.55, 0.85)
-    the dimension is undecided; add agent/review/ambiguous
+no topic applied, and the best topic in [0.55, 0.85)
+    the topics are undecided; add agent/review/ambiguous
 
-nothing applied, and no candidate >= 0.55
+no topic applied, and no topic >= 0.55
     ignore
 ```
 
-A dimension that already produced an applied tag counts as decided, so a
-second, weaker candidate in the band ("maybe also this") is not reported. With
-12 topics and 6 roles, flagging on any in-band value means almost every paper
-is flagged.
+Two deliberate restrictions keep this from firing on almost every paper:
+
+- a dimension that already produced an applied tag counts as decided, so a
+  second, weaker candidate in the band ("maybe also this") is not reported;
+- **roles never gate review.** Roles are facets, so "no confident role" is a
+  normal outcome — it still produces tags, it just does not decide whether a
+  human is needed.
 
 Coverage uses separate thresholds:
 

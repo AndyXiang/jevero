@@ -114,6 +114,11 @@ roles:
     description: >
       Central to the reader's current work: the paper's main result is directly
       usable in that line of work.
+  theory:
+    description: >
+      Develops formal theory rather than a reusable tool: new effective field
+      theories, formal structures, or conceptual frameworks whose value is
+      understanding the physics.
   method:
     description: >
       Provides a technique, formalism, or computational method that can be
