@@ -590,21 +590,29 @@ There is no `ZOTERO_API_KEY` or `ZOTERO_LIBRARY_ID`: the local API serves the
 locally logged-in user as library `0`. The zotero.org Web API client is archived
 in `archive/zotero_web_api.py` (see `archive/README.md`).
 
-### Local API writes are not implemented yet
+### Writing tags: local API authorization
 
-Local writes need more than a key in `.env`:
+Writes need **Zotero 10 or later**. Zotero 9 and earlier expose the local API
+read-only: they send no `Zotero-Server-ID` header and have no
+`/api/local/authorize` endpoint, and `--apply` refuses before doing any work.
 
-1. a **local API key**, which Zotero grants at runtime through a confirmation
-   dialog (`POST /api/local/authorize`). It is unrelated to a zotero.org key,
-   cannot be created in advance, and may be single-use;
-2. the **`Zotero-Server-ID`** response header, echoed back on every write
-   (otherwise `428 Precondition Required`);
-3. local object versions, which have **no relation** to Web API versions.
+On Zotero 10+ the flow is:
 
-Until that flow exists, `supports_write` is `False` and `--apply` refuses to
-start rather than failing paper by paper. `merge_tags()` — the
-correctness-critical part, preserving unrelated tags — is implemented and unit
-tested.
+1. the first write calls `POST /api/local/authorize` with the `Zotero-Server-ID`
+   header. Zotero shows a confirmation dialog naming the application
+   (`zotero.app_name`, default `jevero`);
+2. **choose "Always Allow"**, which is required: a key granted with plain
+   "Allow" is single-use, so it would mean one dialog per paper. jevero rejects
+   a single-use key and tells you to re-run and pick "Always Allow";
+3. the key is kept **in memory only** — never written to `.env` or disk — and
+   reused for the rest of the run;
+4. every write echoes `Zotero-Server-ID` (otherwise `428 Precondition
+   Required`) and carries `If-Unmodified-Since-Version`. A `412` means the item
+   changed underneath and the run must be repeated; a `401` means the key was
+   consumed or revoked, and jevero re-authorizes once and retries.
+
+Local object versions have **no relation** to Web API versions, so the two
+backends must never share cached versions.
 
 Do not commit `.env`.
 

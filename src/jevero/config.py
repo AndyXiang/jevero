@@ -113,6 +113,8 @@ class ZoteroConfig(BaseModel):
 
     base_url: str = "http://127.0.0.1:23119/api"
     inbox_collection: str = "00 Inbox"
+    #: Name shown in the Zotero write-authorization dialog.
+    app_name: str = "jevero"
     timeout_seconds: float = Field(default=30.0, gt=0)
 
 

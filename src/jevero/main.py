@@ -14,6 +14,7 @@ Safety rules enforced here:
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -151,26 +152,40 @@ def check(
 
     load_environment()
     _report_env("OPENROUTER_API_KEY", openrouter_api_key)
+    if not os.environ.get("OPENROUTER_API_KEY"):
+        typer.echo(
+            f"    put it in {Path('.env').resolve()} "
+            "(cp .env.example .env), or export it in the shell"
+        )
 
     try:
         with _zotero_client(config) as zotero:
             collection_key = zotero.find_collection_key(config.zotero.inbox_collection)
             count = sum(1 for _ in zotero.iter_papers(collection_key=collection_key))
+            version = zotero.zotero_version
+            label = f"Zotero {version}" if version else "Zotero"
             typer.secho(
-                f"  Zotero local API at {config.zotero.base_url}: ok",
+                f"  Zotero local API at {config.zotero.base_url}: ok ({label})",
                 fg=typer.colors.GREEN,
             )
             typer.secho(
                 f"  Inbox {config.zotero.inbox_collection!r}: {count} top-level items",
                 fg=typer.colors.GREEN,
             )
+            if zotero.server_id:
+                typer.secho(
+                    "  local writes: available (--apply will ask for "
+                    '"Always Allow" once)',
+                    fg=typer.colors.GREEN,
+                )
+            else:
+                typer.secho(
+                    "  local writes: unavailable, this Zotero does not report a "
+                    "Zotero-Server-ID (local writes need Zotero 10+)",
+                    fg=typer.colors.YELLOW,
+                )
     except ZoteroError as exc:
         typer.secho(f"  Zotero local API: {exc}", fg=typer.colors.RED)
-    typer.secho(
-        "  writes: unavailable (the local API key flow is not implemented yet; "
-        "--apply will refuse)",
-        fg=typer.colors.YELLOW,
-    )
 
 
 def _run(
@@ -181,23 +196,38 @@ def _run(
     include_processed: bool,
 ) -> RunSummary:
     summary = RunSummary()
-    with _zotero_client(config) as zotero, _jev_client(config) as jev:
-        if mutate and not zotero.supports_write:
-            raise ZoteroWriteError(
-                "cannot write: this client cannot authorize local API writes "
-                "yet. Run with --dry-run to inspect, or restore the archived "
-                "Web API client (archive/README.md)."
-            )
+    with _zotero_client(config) as zotero:
+        # Check writability before demanding a classifier credential and before
+        # spending anything: on Zotero < 10 there is nothing to write with.
+        if mutate:
+            if not zotero.supports_write:
+                raise ZoteroWriteError(
+                    "cannot write: this client has no write support. Run with "
+                    "--dry-run to inspect, or restore the archived Web API "
+                    "client (archive/README.md)."
+                )
+            zotero.ensure_writes_available()
+
         collection_key = zotero.find_collection_key(config.zotero.inbox_collection)
         typer.echo(
             f"Inbox {config.zotero.inbox_collection!r} ({collection_key}) "
             f"via the Zotero local API"
         )
+        if mutate:
+            typer.secho(
+                'writes need a one-time Zotero confirmation; choose "Always '
+                'Allow" when Zotero asks (a single-use key would mean one '
+                "dialog per paper)",
+                fg=typer.colors.YELLOW,
+            )
 
-        for item in zotero.iter_papers(collection_key=collection_key, limit=limit):
-            if not include_processed and STATE_PROCESSED in item.tags:
-                continue
-            _process_one(item, config, zotero=zotero, jev=jev, mutate=mutate, summary=summary)
+        with _jev_client(config) as jev:
+            for item in zotero.iter_papers(collection_key=collection_key, limit=limit):
+                if not include_processed and STATE_PROCESSED in item.tags:
+                    continue
+                _process_one(
+                    item, config, zotero=zotero, jev=jev, mutate=mutate, summary=summary
+                )
     return summary
 
 
@@ -371,6 +401,7 @@ def _zotero_client(config: Config) -> ZoteroClient:
     return ZoteroClient(
         base_url=config.zotero.base_url,
         timeout_seconds=config.zotero.timeout_seconds,
+        app_name=config.zotero.app_name,
     )
 
 

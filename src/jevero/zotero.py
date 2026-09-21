@@ -4,23 +4,29 @@ Requests go to the Zotero desktop client's local implementation of the Web API
 on ``localhost:23119`` under ``/api/``. Zotero's SQLite database is never opened
 or modified.
 
-Why local only, for now:
+Why local only:
 
 * reads need no credentials and no network, so ``--dry-run`` works offline and
   is never rate limited;
-* writes need a local API key that Zotero grants at runtime through a
-  confirmation dialog (``POST /api/local/authorize``). That flow is not
-  implemented yet, so ``supports_write`` is ``False`` and ``--apply`` fails
-  fast instead of half-working.
+* writes use a key Zotero grants at runtime through a confirmation dialog
+  (``POST /api/local/authorize``). That key is unrelated to a zotero.org API
+  key, cannot be created in advance, and is kept in memory only.
 
 The zotero.org Web API client is archived in ``archive/zotero_web_api.py``.
 
-Two details drive the shape of this module:
+Details that drive the shape of this module:
 
 * the local API must be enabled in Zotero's preferences, otherwise every
-  request returns ``403 Forbidden``; and
+  request returns ``403 Forbidden``;
+* **local writes exist in Zotero 10+ only.** Zotero identifies itself with a
+  ``Zotero-Server-ID`` response header; without it, ``ensure_writes_available``
+  refuses before any work is done;
+* every write must echo ``Zotero-Server-ID`` (otherwise ``428``) and carry
+  ``If-Unmodified-Since-Version``; a ``412`` means the item changed underneath;
 * ``tags`` is a *complete list* on write, not a patch, so unrelated existing
-  tags must be merged back in and never dropped.
+  tags must be merged back in and never dropped;
+* local object versions have **no relation** to Web API versions, so the two
+  backends must never share cached versions.
 """
 
 from __future__ import annotations
@@ -41,6 +47,10 @@ LOCAL_USER_ID = "0"
 #: Only API version 3 exists locally, and only one version at a time.
 ZOTERO_API_VERSION = "3"
 PAGE_SIZE = 100
+#: Asks Zotero for a local write key; shows a confirmation dialog (Zotero 10+).
+AUTHORIZE_PATH = "/local/authorize"
+#: Shown in that dialog, so the user knows who is asking to modify the library.
+APP_NAME = "jevero"
 
 #: Item types that are not papers and must never be classified.
 _NON_PAPER_TYPES = frozenset({"attachment", "note", "annotation"})
@@ -65,7 +75,15 @@ class ZoteroReadError(ZoteroError):
 
 
 class ZoteroWriteError(ZoteroError):
-    """A write failed, was refused, or is not available yet."""
+    """A write failed, was refused, or is not available on this Zotero."""
+
+
+class ZoteroAuthorizationError(ZoteroWriteError):
+    """Zotero would not grant a usable local write key."""
+
+
+class ZoteroAuthorizationDeniedError(ZoteroAuthorizationError):
+    """The user denied the Zotero write-authorization dialog."""
 
 
 class ZoteroNotFoundError(ZoteroReadError):
@@ -149,11 +167,16 @@ class ZoteroClient:
         *,
         base_url: str = LOCAL_BASE_URL,
         timeout_seconds: float = 30.0,
+        app_name: str = APP_NAME,
         http_client: httpx.Client | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
+        self.app_name = app_name
         self._http = http_client or create_client(timeout_seconds)
         self._owns_client = http_client is None
+        self._server_id: str | None = None
+        self._zotero_version: str | None = None
+        self._write_key: str | None = None
 
     def __enter__(self) -> ZoteroClient:
         return self
@@ -167,13 +190,24 @@ class ZoteroClient:
 
     @property
     def supports_write(self) -> bool:
-        """False until the runtime local-key authorization flow is implemented.
+        """Whether this client implements tag writes at all.
 
-        Local writes (Zotero 10+) require a key granted on this machine through
-        a confirmation dialog, plus a ``Zotero-Server-ID`` header. Until that
-        exists, the CLI refuses ``--apply`` rather than failing per paper.
+        The flow is implemented, but whether the *running* Zotero allows it is
+        a property of that instance: local writes exist in Zotero 10+ only. Call
+        :meth:`ensure_writes_available` before doing work that assumes writes,
+        so an unsupported Zotero fails fast instead of per paper.
         """
-        return False
+        return True
+
+    @property
+    def zotero_version(self) -> str | None:
+        """Version string reported by the desktop app, if it reports one."""
+        return self._zotero_version
+
+    @property
+    def server_id(self) -> str | None:
+        """The desktop instance identity, cached from any response header."""
+        return self._server_id
 
     @property
     def library_prefix(self) -> str:
@@ -215,20 +249,162 @@ class ZoteroClient:
             raise ZoteroReadError(f"item {key} has no usable data")
         return item
 
+    def ensure_writes_available(self) -> None:
+        """Fail fast when the running Zotero cannot accept local writes.
+
+        Local writes exist in Zotero 10+, which identifies itself with a
+        ``Zotero-Server-ID`` response header. Zotero 9 and earlier expose the
+        local API read-only, so ``--apply`` must refuse before spending a
+        classifier request rather than discovering it per paper.
+        """
+        if self.server_id is not None:
+            return
+        self._probe_instance()
+        if self.server_id is not None:
+            return
+        version = f" (Zotero {self._zotero_version})" if self._zotero_version else ""
+        raise ZoteroWriteError(
+            f"this Zotero{version} does not support local API writes: no "
+            "Zotero-Server-ID header, which Zotero 10+ adds. Upgrade Zotero to "
+            "10 or later to write tags locally, or restore the archived Web API "
+            "client (archive/README.md) and use a zotero.org API key"
+        )
+
+    def authorize_writes(self, *, require_remember: bool = True) -> str:
+        """Ask Zotero for a local write key, showing a confirmation dialog.
+
+        The dialog is the user's consent, and it names this application. A key
+        granted with "Allow" is single-use, which would mean one dialog per
+        paper, so "Always Allow" is required by default; the granted key is kept
+        in memory only and never written to disk.
+
+        Raises:
+            ZoteroAuthorizationDeniedError: the user pressed Deny.
+            ZoteroAuthorizationError: single-use key, unsupported Zotero, or
+                rate-limited dialogs.
+        """
+        server_id = self._require_server_id()
+        response = self._request(
+            "POST",
+            AUTHORIZE_PATH,
+            json={"appName": self.app_name},
+            headers={"Zotero-Server-ID": server_id},
+        )
+
+        if response.status_code == 403:
+            raise ZoteroAuthorizationDeniedError(
+                "the Zotero confirmation dialog was denied; jevero cannot write "
+                "tags without it"
+            )
+        if response.status_code == 404:
+            raise ZoteroAuthorizationError(
+                "this Zotero has no /api/local/authorize endpoint, so local "
+                "writes are unsupported; Zotero 10+ is required"
+            )
+        if response.status_code == 429:
+            raise ZoteroAuthorizationError(
+                "Zotero is rate-limiting authorization dialogs (HTTP 429); wait "
+                "a minute, then retry"
+            )
+        if response.status_code >= 400:
+            raise ZoteroAuthorizationError(
+                f"local write authorization failed with HTTP "
+                f"{response.status_code}: {_snippet(response)}"
+            )
+
+        payload = _json_object(response, "authorization")
+        key = payload.get("key")
+        if not isinstance(key, str) or not key:
+            raise ZoteroAuthorizationError(
+                "Zotero did not return a local API key; refusing to write"
+            )
+
+        if require_remember and payload.get("remember") is not True:
+            raise ZoteroAuthorizationError(
+                'Zotero granted a single-use key because "Always Allow" was not '
+                'chosen. jevero requires "Always Allow": a single-use key would '
+                "show one confirmation dialog per paper. Re-run --apply and "
+                'choose "Always Allow" in the Zotero dialog.'
+            )
+
+        self._write_key = key
+        return key
+
     def apply_actions(self, item: ZoteroItem, actions: PolicyActions) -> list[str]:
         """Write tags for one item, preserving every unrelated existing tag.
 
-        Not available yet: the local API needs a runtime-granted key. Raises
-        ``ZoteroWriteError`` with the reason. The CLI refuses ``--apply`` before
-        reaching this point.
+        Authorizes on the first write (one Zotero dialog), then reuses the
+        remembered key. A ``401`` means the key was consumed or revoked, so the
+        write is retried once with a fresh authorization.
         """
         if actions.is_empty:
             return item.tags
-        raise ZoteroWriteError(
-            "writing tags over the local API needs a key that Zotero grants at "
-            "runtime (POST /api/local/authorize), which is not implemented yet; "
-            "use --dry-run, or restore the archived Web API client"
+
+        merged = merge_tags(item.tags, actions)
+        if merged == sorted(item.tags):
+            return item.tags
+
+        server_id = self._require_server_id()
+        if self._write_key is None:
+            self.authorize_writes()
+        assert self._write_key is not None  # set by authorize_writes
+
+        response = self._patch_tags(item, merged, self._write_key, server_id)
+        if response.status_code == 401:
+            # Single-use or revoked key: authorize again and retry exactly once.
+            self._write_key = None
+            self.authorize_writes()
+            assert self._write_key is not None
+            response = self._patch_tags(item, merged, self._write_key, server_id)
+
+        if response.status_code == 412:
+            raise ZoteroWriteError(
+                f"item {item.key} changed since it was read; re-run to retry"
+            )
+        if response.status_code == 401:
+            raise ZoteroWriteError(
+                f"Zotero still rejected the write to {item.key} after "
+                "re-authorizing; check Settings -> Advanced -> "
+                "'Clear Write Authorizations' and retry"
+            )
+        if response.status_code >= 400:
+            raise ZoteroWriteError(
+                f"writing tags to {item.key} failed with HTTP "
+                f"{response.status_code}: {_snippet(response)}"
+            )
+        return merged
+
+    def _patch_tags(
+        self, item: ZoteroItem, tags: list[str], key: str, server_id: str
+    ) -> httpx.Response:
+        return self._request(
+            "PATCH",
+            f"{self.library_prefix}/items/{item.key}",
+            json={"tags": [{"tag": tag} for tag in tags]},
+            headers={
+                "Zotero-API-Key": key,
+                "Zotero-Server-ID": server_id,
+                "If-Unmodified-Since-Version": str(item.version),
+            },
         )
+
+    def _require_server_id(self) -> str:
+        self._probe_instance()
+        if self._server_id is None:
+            self.ensure_writes_available()
+        assert self._server_id is not None
+        return self._server_id
+
+    def _probe_instance(self) -> None:
+        """Read ``GET /api/`` once for the instance identity and version."""
+        if self._server_id is not None or self._zotero_version is not None:
+            return
+        response = self._request("GET", "/")
+        if response.status_code >= 400:
+            raise ZoteroReadError(
+                f"GET {self.base_url}/ failed with HTTP "
+                f"{response.status_code}: {_snippet(response)}"
+            )
 
     def _iter_pages(self, path: str) -> Iterator[dict[str, Any]]:
         start = 0
@@ -272,19 +448,52 @@ class ZoteroClient:
         path: str,
         *,
         params: dict[str, Any] | None = None,
+        json: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
     ) -> httpx.Response:
+        request_headers = {"Zotero-API-Version": ZOTERO_API_VERSION}
+        if headers:
+            request_headers.update(headers)
         try:
-            return self._http.request(
+            response = self._http.request(
                 method,
                 self.base_url + path,
                 params=params,
-                headers={"Zotero-API-Version": ZOTERO_API_VERSION},
+                json=json,
+                headers=request_headers,
             )
         except httpx.HTTPError as exc:
             raise ZoteroReadError(
                 f"could not reach the Zotero local API at {self.base_url} "
                 f"(is the Zotero desktop app running?): {exc}"
             ) from exc
+        self._capture_instance(response)
+        return response
+
+    def _capture_instance(self, response: httpx.Response) -> None:
+        """Cache the instance identity and version from any response.
+
+        ``Zotero-Server-ID`` exists only in Zotero 10+, so its presence is also
+        how write support is detected.
+        """
+        server_id = response.headers.get("Zotero-Server-ID")
+        if server_id:
+            self._server_id = server_id
+        version = response.headers.get("X-Zotero-Version")
+        if version:
+            self._zotero_version = version
+
+
+def _json_object(response: httpx.Response, what: str) -> dict[str, Any]:
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise ZoteroReadError(f"{what} response was not JSON") from exc
+    if not isinstance(payload, dict):
+        raise ZoteroReadError(
+            f"{what} response must be a JSON object, got {type(payload).__name__}"
+        )
+    return payload
 
 
 def _to_item(raw: dict[str, Any]) -> ZoteroItem | None:

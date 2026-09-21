@@ -162,7 +162,7 @@ The `projects` dimension (per-project usefulness) is **not implemented**. It was
 The **Zotero Web API is also deferred**. Zotero is read through the desktop local API on `127.0.0.1:23119` only; the Web API client is archived in `archive/zotero_web_api.py`, with restore instructions in `archive/README.md`.
 
 - Reads need no credentials and no network. The local API must be enabled in Zotero's preferences, otherwise every request returns `403`.
-- **Writes are not implemented.** Local writes need a runtime-granted local API key plus a `Zotero-Server-ID` header. `ZoteroClient.supports_write` is `False` and `--apply` refuses to start, so no code path may claim a write succeeded.
+- **Writes need Zotero 10 or later.** They use a local API key granted at runtime (`POST /api/local/authorize`) and require `Zotero-Server-ID` on every write. "Always Allow" is mandatory: a single-use key would mean one dialog per paper. The key stays in memory and is never written to disk. Call `ensure_writes_available()` before doing work that assumes writes, so an older Zotero fails fast instead of per paper, and never claim a write succeeded without a 2xx response.
 - Do not put a `ZOTERO_API_KEY` / `ZOTERO_LIBRARY_ID` path back into active code without restoring the archived client deliberately.
 
 ---

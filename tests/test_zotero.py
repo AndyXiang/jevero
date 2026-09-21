@@ -1,6 +1,13 @@
-"""Zotero local API tests. HTTP is mocked; Zotero's SQLite is never touched."""
+"""Zotero local API tests. HTTP is mocked; Zotero's SQLite is never touched.
+
+The write tests script the three real requests of the local write flow: the
+instance probe (``GET /api/``), the authorization dialog
+(``POST /api/local/authorize``), and the versioned tag write (``PATCH``).
+"""
 
 from __future__ import annotations
+
+import json
 
 import httpx
 import pytest
@@ -8,6 +15,8 @@ import pytest
 from jevero.models import PolicyActions
 from jevero.zotero import (
     LOCAL_BASE_URL,
+    ZoteroAuthorizationDeniedError,
+    ZoteroAuthorizationError,
     ZoteroClient,
     ZoteroItem,
     ZoteroLocalApiDisabledError,
@@ -227,18 +236,208 @@ def test_unreachable_zotero_reports_the_running_hint():
 
 
 # --------------------------------------------------------------------------- #
-# writes: deliberately unavailable until the local key flow exists
+# writes: runtime authorization, then a versioned PATCH
 # --------------------------------------------------------------------------- #
 
 
-def test_writes_are_not_available_yet(zotero_item_payload: dict):
-    with make_client(_unused_handler) as client:
-        assert client.supports_write is False
+class LocalApi:
+    """Scripted local API: instance probe, authorization dialog, tag write."""
 
-        with pytest.raises(ZoteroWriteError, match="api/local/authorize"):
+    def __init__(
+        self,
+        *,
+        server_id: str | None = "srv-1",
+        zotero_version: str | None = "10.0.1",
+        remember: bool = True,
+        authorize_status: int = 200,
+        patch_status: int = 204,
+        reject_first_patch_with_401: bool = False,
+    ) -> None:
+        self.server_id = server_id
+        self.zotero_version = zotero_version
+        self.remember = remember
+        self.authorize_status = authorize_status
+        self.patch_status = patch_status
+        self.reject_first_patch_with_401 = reject_first_patch_with_401
+        self.authorize_calls = 0
+        self.patch_headers: list[httpx.Headers] = []
+        self.patch_bodies: list[dict] = []
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if request.method == "GET" and path == "/api/":
+            headers = {}
+            if self.server_id:
+                headers["Zotero-Server-ID"] = self.server_id
+            if self.zotero_version:
+                headers["X-Zotero-Version"] = self.zotero_version
+            return httpx.Response(200, text="Zotero is running", headers=headers)
+
+        if request.method == "POST" and path == "/api/local/authorize":
+            self.authorize_calls += 1
+            if self.authorize_status != 200:
+                return httpx.Response(self.authorize_status, text="denied")
+            return httpx.Response(
+                200, json={"key": f"local-key-{self.authorize_calls}", "remember": self.remember}
+            )
+
+        if request.method == "PATCH":
+            self.patch_headers.append(request.headers)
+            self.patch_bodies.append(json.loads(request.content))
+            if self.reject_first_patch_with_401 and len(self.patch_headers) == 1:
+                return httpx.Response(401, text="key consumed")
+            return httpx.Response(self.patch_status)
+
+        return httpx.Response(404, text=f"unexpected {request.method} {path}")
+
+
+def test_unauthorized_zotero_without_a_server_id_cannot_write(
+    zotero_item_payload: dict,
+):
+    """Zotero 9 and earlier expose the local API read-only."""
+    api = LocalApi(server_id=None, zotero_version="9.0.6")
+
+    with make_client(api.handler) as client:
+        assert client.supports_write is True  # the flow exists...
+        with pytest.raises(ZoteroWriteError, match="Zotero 10"):
+            client.ensure_writes_available()
+
+        with pytest.raises(ZoteroWriteError, match="9.0.6"):
             client.apply_actions(
                 _item(zotero_item_payload), PolicyActions(add_tags={"agent/processed"})
             )
+
+    assert api.patch_headers == []
+
+
+def test_ensure_writes_available_passes_when_the_server_id_is_reported():
+    api = LocalApi()
+
+    with make_client(api.handler) as client:
+        client.ensure_writes_available()
+
+        assert client.server_id == "srv-1"
+        assert client.zotero_version == "10.0.1"
+
+
+def test_authorization_requires_always_allow():
+    """A single-use key would mean one dialog per paper."""
+    api = LocalApi(remember=False)
+
+    with make_client(api.handler) as client:
+        with pytest.raises(ZoteroAuthorizationError, match="Always Allow"):
+            client.authorize_writes()
+
+
+def test_authorization_accepts_always_allow():
+    api = LocalApi(remember=True)
+
+    with make_client(api.handler) as client:
+        assert client.authorize_writes() == "local-key-1"
+
+
+def test_authorization_request_carries_the_server_id_and_app_name():
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/local/authorize":
+            seen["headers"] = request.headers
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(200, json={"key": "k", "remember": True})
+        return httpx.Response(200, text="", headers={"Zotero-Server-ID": "srv-9"})
+
+    with make_client(handler) as client:
+        client.authorize_writes()
+
+    assert seen["headers"]["Zotero-Server-ID"] == "srv-9"
+    assert seen["body"] == {"appName": "jevero"}
+
+
+def test_authorization_denied_by_the_user():
+    api = LocalApi(authorize_status=403)
+
+    with make_client(api.handler) as client:
+        with pytest.raises(ZoteroAuthorizationDeniedError, match="denied"):
+            client.authorize_writes()
+
+
+def test_authorization_on_a_unsupported_zotero():
+    api = LocalApi(authorize_status=404)
+
+    with make_client(api.handler) as client:
+        with pytest.raises(ZoteroAuthorizationError, match="Zotero 10"):
+            client.authorize_writes()
+
+
+def test_authorization_rate_limited_dialogs():
+    api = LocalApi(authorize_status=429)
+
+    with make_client(api.handler) as client:
+        with pytest.raises(ZoteroAuthorizationError, match="429"):
+            client.authorize_writes()
+
+
+def test_apply_actions_authorizes_once_then_writes_merged_tags(
+    zotero_item_payload: dict,
+):
+    api = LocalApi()
+    item = _item(zotero_item_payload)
+    actions = PolicyActions(
+        add_tags={"topic/nrqcd", "agent/processed"}, remove_tags={"topic/quarkonium"}
+    )
+
+    with make_client(api.handler) as client:
+        merged = client.apply_actions(item, actions)
+        # Second write reuses the remembered key: no second dialog.
+        client.apply_actions(item, PolicyActions(add_tags={"role/core"}))
+
+    assert api.authorize_calls == 1
+    assert api.patch_headers[0]["If-Unmodified-Since-Version"] == "417"
+    assert api.patch_headers[0]["Zotero-Server-ID"] == "srv-1"
+    assert api.patch_headers[0]["Zotero-API-Key"] == "local-key-1"
+    tags = [entry["tag"] for entry in api.patch_bodies[0]["tags"]]
+    assert tags == ["agent/processed", "my own tag", "to-read", "topic/nrqcd"]
+    assert merged == tags
+
+
+def test_apply_actions_reauthorizes_once_after_a_401(zotero_item_payload: dict):
+    api = LocalApi(reject_first_patch_with_401=True)
+
+    with make_client(api.handler) as client:
+        merged = client.apply_actions(
+            _item(zotero_item_payload), PolicyActions(add_tags={"agent/processed"})
+        )
+
+    assert api.authorize_calls == 2
+    assert len(api.patch_headers) == 2
+    assert api.patch_headers[1]["Zotero-API-Key"] == "local-key-2"
+    assert "agent/processed" in merged
+
+
+def test_apply_actions_reports_a_changed_item(zotero_item_payload: dict):
+    api = LocalApi(patch_status=412)
+
+    with make_client(api.handler) as client:
+        with pytest.raises(ZoteroWriteError, match="changed since it was read"):
+            client.apply_actions(
+                _item(zotero_item_payload), PolicyActions(add_tags={"agent/processed"})
+            )
+
+
+def test_apply_actions_does_not_write_when_tags_are_already_correct(
+    zotero_item_payload: dict,
+):
+    """Nothing to change means no dialog and no request."""
+    api = LocalApi()
+
+    with make_client(api.handler) as client:
+        result = client.apply_actions(
+            _item(zotero_item_payload), PolicyActions(add_tags={"to-read"})
+        )
+
+    assert api.authorize_calls == 0
+    assert api.patch_headers == []
+    assert result == ["to-read", "topic/quarkonium", "my own tag"]
 
 
 def test_empty_actions_are_a_no_op_and_do_not_raise(zotero_item_payload: dict):

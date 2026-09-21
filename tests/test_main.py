@@ -17,7 +17,7 @@ from jevero.config import Config
 from jevero.jev import JevOutcome, JevTransportError
 from jevero.main import app
 from jevero.models import PolicyActions, Usage
-from jevero.zotero import ZoteroClient, ZoteroError, ZoteroItem
+from jevero.zotero import ZoteroClient, ZoteroError, ZoteroItem, ZoteroWriteError
 
 COLLECTION_KEY = "INBOX123"
 
@@ -55,8 +55,10 @@ class FakeJevClient:
     def __init__(self, outcome: JevOutcome | None = None, error: Exception | None = None):
         self._outcome = outcome
         self._error = error
+        self.calls = 0
 
     def classify(self, paper, config):
+        self.calls += 1
         if self._error is not None:
             raise self._error
         assert self._outcome is not None
@@ -75,9 +77,16 @@ class FakeJevClient:
 class FakeZotero:
     """Records the actions ``main`` would write, without writing anything."""
 
-    def __init__(self, item: dict, *, supports_write: bool = True):
+    def __init__(
+        self,
+        item: dict,
+        *,
+        supports_write: bool = True,
+        writes_available: bool = True,
+    ):
         self._item = item
         self._supports_write = supports_write
+        self._writes_available = writes_available
         self.applied: list[PolicyActions] = []
         self.read_paths: list[str] = []
 
@@ -102,6 +111,12 @@ class FakeZotero:
     def get_item(self, key: str) -> ZoteroItem:
         self.read_paths.append(f"item:{key}")
         return self.item
+
+    def ensure_writes_available(self) -> None:
+        if not self._writes_available:
+            raise ZoteroWriteError(
+                "this Zotero (Zotero 9.0.6) does not support local API writes"
+            )
 
     def apply_actions(self, item: ZoteroItem, actions: PolicyActions) -> list[str]:
         self.applied.append(actions)
@@ -187,6 +202,35 @@ def test_apply_fails_fast_when_writes_are_unavailable(
     assert result.exit_code == 2
     assert "cannot write" in result.output
     assert zotero.applied == []
+
+
+def test_apply_reports_an_unsupported_zotero_before_classifying(
+    monkeypatch, config_path: Path
+):
+    """Zotero < 10 must be reported before any classifier spend."""
+    zotero = FakeZotero(ITEM, writes_available=False)
+    jev = FakeJevClient(error=JevTransportError("must not be called"))
+    wire(monkeypatch, zotero, jev)
+
+    result = CliRunner().invoke(app, ["process", "--config", str(config_path), "--apply"])
+
+    assert result.exit_code == 2
+    assert "does not support local API writes" in result.output
+    assert jev.calls == 0
+    assert zotero.applied == []
+
+
+def test_dry_run_does_not_require_writable_zotero(
+    monkeypatch, config_path: Path, confidence: JevOutcome
+):
+    zotero = FakeZotero(ITEM, writes_available=False)
+    wire(monkeypatch, zotero, FakeJevClient(outcome=confidence))
+
+    result = CliRunner().invoke(
+        app, ["process", "--config", str(config_path), "--dry-run"]
+    )
+
+    assert result.exit_code == 0, result.output
 
 
 def test_apply_and_dry_run_together_are_refused(config_path: Path):
