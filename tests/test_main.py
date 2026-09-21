@@ -750,10 +750,10 @@ def test_run_dry_run_writes_nothing(monkeypatch, config_path: Path, confidence: 
     zotero = FakeZotero(ITEM)
     wire(monkeypatch, zotero, FakeJevClient(outcome=confidence))
 
-    result = CliRunner().invoke(app, ["run", "--config", str(config_path)])
+    result = CliRunner().invoke(app, ["run", "--config", str(config_path), "--dry-run"])
 
     assert result.exit_code == 0, result.output
-    assert "add --apply to classify and file" in result.output
+    assert "[dry-run] no Zotero changes" in result.output
     assert zotero.applied == []
     assert zotero.created == []
     assert zotero.membership == []
@@ -763,7 +763,7 @@ def test_run_classifies_then_files(monkeypatch, config_path: Path, confidence: J
     zotero = FakeZotero(ITEM)
     wire(monkeypatch, zotero, FakeJevClient(outcome=confidence))
 
-    result = CliRunner().invoke(app, ["run", "--config", str(config_path), "--apply"])
+    result = CliRunner().invoke(app, ["run", "--config", str(config_path)])
 
     assert result.exit_code == 0, result.output
     # classified...
@@ -780,7 +780,7 @@ def test_run_no_move_classifies_only(monkeypatch, config_path: Path, confidence:
     wire(monkeypatch, zotero, FakeJevClient(outcome=confidence))
 
     result = CliRunner().invoke(
-        app, ["run", "--config", str(config_path), "--apply", "--no-move"]
+        app, ["run", "--config", str(config_path), "--no-move"]
     )
 
     assert result.exit_code == 0, result.output
@@ -797,7 +797,7 @@ def test_run_reports_papers_that_need_metadata(
     jev = FakeJevClient(outcome=confidence)
     wire(monkeypatch, zotero, jev)
 
-    result = CliRunner().invoke(app, ["run", "--config", str(config_path), "--apply"])
+    result = CliRunner().invoke(app, ["run", "--config", str(config_path)])
 
     assert result.exit_code == 0, result.output
     assert jev.calls == 0  # never classified: no abstract
@@ -818,7 +818,7 @@ def test_run_empties_the_inbox_when_configured_to_move(
     wire(monkeypatch, zotero, FakeJevClient(outcome=confidence))
 
     result = CliRunner().invoke(
-        app, ["run", "--config", str(moving_config), "--apply"]
+        app, ["run", "--config", str(moving_config)]
     )
 
     assert result.exit_code == 0, result.output
@@ -831,18 +831,28 @@ def test_run_does_not_ask_for_confirmation(monkeypatch, config_path: Path, confi
     zotero = FakeZotero(ITEM)
     wire(monkeypatch, zotero, FakeJevClient(outcome=confidence))
 
-    result = CliRunner().invoke(app, ["run", "--config", str(config_path), "--apply"])
+    result = CliRunner().invoke(app, ["run", "--config", str(config_path)])
 
     assert result.exit_code == 0, result.output
     assert "WARNING" not in result.output
 
 
-def test_run_and_dry_run_flags_are_mutually_exclusive(config_path: Path):
-    result = CliRunner().invoke(
-        app, ["run", "--config", str(config_path), "--apply", "--dry-run"]
-    )
+def test_run_writes_by_default_and_dry_run_does_not(
+    monkeypatch, config_path: Path, confidence: JevOutcome
+):
+    """`run` needs no --apply: that is the point of the command."""
+    help_text = CliRunner().invoke(app, ["run", "--help"]).output
+    assert "WRITES TO ZOTERO BY DEFAULT" in help_text
 
-    assert result.exit_code != 0
+    zotero = FakeZotero(ITEM)
+    wire(monkeypatch, zotero, FakeJevClient(outcome=confidence))
+    result = CliRunner().invoke(app, ["run", "--config", str(config_path), "--dry-run"])
+    assert zotero.applied == []
+
+    zotero = FakeZotero(ITEM)
+    wire(monkeypatch, zotero, FakeJevClient(outcome=confidence))
+    result = CliRunner().invoke(app, ["run", "--config", str(config_path)])
+    assert len(zotero.applied) == 1
 
 
 def test_limit_counts_papers_to_process_not_items_scanned(
@@ -858,3 +868,60 @@ def test_limit_counts_papers_to_process_not_items_scanned(
 
     assert result.exit_code == 0, result.output
     assert len(zotero.applied) == 1  # the unprocessed one, not the skipped one
+
+
+def test_run_never_moves_a_paper_it_could_not_file(
+    monkeypatch, config_path: Path, tmp_path: Path
+):
+    """Regression: only *filed* papers may leave the inbox.
+
+    A previous `_route` walked every inbox item and, with remove_from_inbox on,
+    dropped the inbox membership of items it could not file — so an
+    `agent/error` paper silently vanished from the inbox while never landing in
+    a collection.
+    """
+    moving_config = tmp_path / "config.yaml"
+    moving_config.write_text(
+        config_path.read_text() + "\ncollections:\n  remove_from_inbox: true\n",
+        encoding="utf-8",
+    )
+    zotero = FakeZotero(ITEM)
+    wire(monkeypatch, zotero, FakeJevClient(error=JevResponseError("no answer")))
+
+    result = CliRunner().invoke(app, ["run", "--config", str(moving_config)])
+
+    assert result.exit_code == 1  # the paper failed, so the run reports it
+    assert zotero.applied[0].add_tags == {"agent/error"}
+    # Nothing was filed, so nothing may have been moved out of the inbox.
+    assert zotero.membership == []
+    assert "Inbox now holds 1 papers" in result.output
+
+
+def test_route_leaves_unroutable_papers_where_they_are(
+    monkeypatch, config_path: Path, tmp_path: Path
+):
+    moving_config = tmp_path / "config.yaml"
+    moving_config.write_text(
+        config_path.read_text() + "\ncollections:\n  remove_from_inbox: true\n",
+        encoding="utf-8",
+    )
+    errored = {
+        "key": "ABCD2345",
+        "version": 420,
+        "data": {**ITEM["data"], "tags": [{"tag": "agent/error"}]},
+    }
+    untagged = {
+        "key": "EFGH6789",
+        "version": 6,
+        "data": {**ITEM["data"], "key": "EFGH6789", "tags": []},
+    }
+    zotero = FakeZotero(errored, extra_items=(untagged,))
+    wire(monkeypatch, zotero, FakeJevClient())
+
+    result = CliRunner().invoke(
+        app, ["route", "--config", str(moving_config), "--apply"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert zotero.membership == []
+    assert "0 routed, 2 unchanged" in result.output

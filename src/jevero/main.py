@@ -226,32 +226,28 @@ def run(
     config_path: Path = typer.Option(
         DEFAULT_CONFIG, "--config", "-c", help="Path to config.yaml."
     ),
-    apply: bool = typer.Option(
-        False, "--apply", help="Classify and file for real. Without it, nothing changes."
-    ),
     dry_run: bool = typer.Option(
-        False, "--dry-run", help="Explicitly inspect only. This is the default."
+        False, "--dry-run", help="Show what would happen; write nothing."
     ),
     limit: int = typer.Option(0, "--limit", help="Stop after N papers (0 = no limit)."),
     no_move: bool = typer.Option(
         False, "--no-move", help="Classify but leave the papers in the inbox."
     ),
 ) -> None:
-    """Classify the inbox, then file each paper where its tags point.
+    """Classify the inbox and file each paper where its tags point.
 
-    The one-shot equivalent of ``process --apply`` followed by
+    THIS WRITES TO ZOTERO BY DEFAULT — it is the one-shot "do the work" command,
+    and it takes no --apply flag. Pass --dry-run to see the plan first.
+
+    It is the equivalent of ``process --apply`` followed by
     ``route --apply --prune``, scoped to the configured inbox only.
 
     Papers that need a human — a missing abstract, or a review flag — stay in the
     inbox on purpose, so the inbox reads as the remaining work.
     """
-    if apply and dry_run:
-        raise typer.BadParameter("--apply and --dry-run are mutually exclusive")
-
-    mutate = apply
+    mutate = not dry_run
     if not mutate:
         typer.secho("[dry-run] no Zotero changes will be made", fg=typer.colors.YELLOW)
-        typer.secho("          add --apply to classify and file", fg=typer.colors.YELLOW)
 
     try:
         config = load_config(config_path)
