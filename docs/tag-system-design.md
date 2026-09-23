@@ -276,3 +276,30 @@ P0 可以立刻做且零风险。P1 是"解决这个问题"的主体。
 2. **coverage 落地**：不落地（现状）/ 只把 `irrelevant` 变成 reason / `coverage/*` 持久标签？现状是"系统认为超出范围"和"没有 topic 过线"在库里不可区分。
 3. **`kind/experiment`、`kind/reference`**：这两个也是 0 次应用，但语义上没错。留着让每次运行的使用摘要去点名，还是现在就退掉？
 4. **`jevero vocab` / `jevero eval`**：词汇表卫生与回归度量的自动化（P3）。
+
+---
+
+## 8. 观察记录：review 队列点出来的候选词（**未采用**，2026-09）
+
+词汇表演化的流程是 `classify → 收集 review/taxonomy-gap → 人判断 → 改 config.yaml`。
+下面是第一次真实攒到的证据，**决定是暂不加入**，留待同类论文继续出现。
+
+用 3 篇论文各测一次候选词（每次一次判定调用，未写库）：
+
+| 论文 | 候选词 | 该词概率 | coverage 变化 | 若采用的效果 |
+| --- | --- | --- | --- | --- |
+| `CDV2WJT7` Exact Amplitude Reconstruction（small-x 衍射能流） | `amplitudes` | **0.94** | missing-topic 0.67 → 0.13 | gap 消失，拿到 `topic/amplitudes` |
+| `NI2SM37I` Nuclear Many-Body → Energy Detector Correlators | `heavy-ion` | **0.88** | covered 0.91（不变） | 拿到 `topic/heavy-ion`；说明**当初没标 gap 不是模型错，而是词表真的缺这个词** |
+| `CM92MSVI` Genus drop in Feynman integrals | `loop-integrals` | **0.71** | covered 0.71 | 拿到 `topic/loop-integrals`，出 review 队列 |
+
+全库影响（候选 config 干跑 31 篇，$0.005）：**4/31 篇变化**，其中 3 篇是上面这三个词各命中 1 篇，
+第 4 篇（`4VS4HYP2`）是 kind 在 0.70 门口的抖动，与新词无关；其余 27 篇一字未动；review 队列会清空。
+
+**决定：暂不采用。** 当前证据是 1 篇明确 + 1 篇边缘 + 1 篇（loop-integrals）属于早先误删，数量还不足以支撑扩张词表。
+
+### 教训：小库里"0 次应用"是删词的弱证据
+
+`amplitudes` 和 `loop-integrals` 在 2026-09 因为"29 篇里 0 次应用"被删掉，两天后一篇新论文正好建立在
+`amplitudes` 上（p=0.94）。使用统计衡量的是**当前**使用，不是**未来需要**——库里只有 31 篇、
+还在增长时，"0 次应用"更像"还没遇到"，而不是"不需要"。判据应改成
+"0 次应用**且**没有合理预期它会到来"，后者只能由人判断。
