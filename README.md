@@ -138,7 +138,7 @@ Python applies explicit thresholds:
 if result.topics["nrqcd"] >= config.thresholds.apply_floor:
     add_tag("topic/nrqcd")
 
-if result.coverage["missing-topic"] >= 0.25:
+if result.coverage["missing-topic"] >= 0.50:
     add_tag("review/taxonomy-gap")
 ```
 
@@ -167,7 +167,15 @@ The configured topics adequately describe the paper.
 
 ### `missing-topic`
 
-The paper appears relevant to the literature workflow, but none of the current topic definitions fit well.
+The paper is in scope, but the topic list leaves out something central to it — the
+area of physics it belongs to, or the framework it is built on. A reader browsing
+the topics would look for such a paper and not find where it belongs, even if one
+listed topic happens to match its observable.
+
+This has to be asked about the **area or the framework**, not only about the
+framework: a paper whose method matches a listed topic while its whole subfield does
+not used to answer "not a gap" (measured 0.18 for a heavy-ion paper, against a 0.25
+gate), so an entire missing subfield stayed invisible.
 
 The paper should be marked:
 
@@ -400,7 +408,7 @@ thresholds:
   kind_max: 2
 
   review: 0.55
-  missing_topic_review: 0.25
+  missing_topic_review: 0.50
   irrelevant: 0.80
   covered_apply: 0.70
 
@@ -888,7 +896,7 @@ Coverage is judged on the paper's **approach**, not on every detail, and uses it
 own gates:
 
 ```text
-missing-topic >= 0.25
+missing-topic >= 0.50
     the approach has no place in the taxonomy; add review/taxonomy-gap
 
 covered < 0.70

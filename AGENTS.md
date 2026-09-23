@@ -137,7 +137,7 @@ irrelevant
 Interpretation:
 
 - `covered`: the current taxonomy is adequate;
-- `missing-topic`: the paper appears relevant, but the taxonomy is missing an appropriate topic;
+- `missing-topic`: the paper is in scope, but the list leaves out its area of physics or the framework it is built on;
 - `irrelevant`: the paper is outside the intended literature scope.
 
 If `missing-topic` is sufficiently probable, add:
@@ -280,7 +280,7 @@ thresholds:
   topic_max: 3
   kind_max: 2
   review: 0.55
-  missing_topic_review: 0.25   # calibrated: real gap 0.32 vs highest non-gap 0.16
+  missing_topic_review: 0.50   # calibrated: real gaps 0.63/0.71/0.84 vs highest non-gap 0.33
   irrelevant: 0.80
   covered_apply: 0.70
 

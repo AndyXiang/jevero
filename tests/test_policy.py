@@ -76,7 +76,7 @@ def test_missing_topic_reports_a_taxonomy_gap_and_never_invents_a_topic(
 def test_missing_topic_below_threshold_does_not_report_a_gap(config, result_factory):
     result = result_factory(
         topics={"quarkonium": 0.95},
-        coverage={"covered": 0.9, "missing-topic": 0.69, "irrelevant": 0.05},
+        coverage={"covered": 0.9, "missing-topic": 0.49, "irrelevant": 0.05},
     )
     actions = plan(result, config)
 

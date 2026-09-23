@@ -33,7 +33,7 @@ thresholds:
   kind_floor: 0.70
 
   review: 0.55
-  missing_topic_review: 0.70
+  missing_topic_review: 0.50
   irrelevant: 0.80
   covered_apply: 0.70
 

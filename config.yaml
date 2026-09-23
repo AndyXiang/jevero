@@ -188,11 +188,12 @@ coverage:
       long as its approach fits inside a listed topic.
   missing-topic:
     description: >
-      The paper is within the intended literature scope and is built on a whole
-      approach - an entire method, framework, or subfield - that no configured
-      topic has any place for: browsing the topic list would leave this paper's
-      approach with nowhere to go. A gap of that size is a human decision, not
-      something to invent here.
+      The paper is within the intended literature scope, but the topic list
+      leaves out something central to it: the area of physics it belongs to, or
+      the framework it is built on. A reader browsing the topics would look for
+      such a paper and not find where it belongs, even if one listed topic
+      happens to match its observable. A gap of that size is a human decision,
+      not something to invent here.
   irrelevant:
     description: >
       The paper is outside the intended literature scope and does not justify
@@ -234,12 +235,12 @@ thresholds:
   # Review band and coverage gates. Every jevero/review/... tag traces back to
   # exactly one of these comparisons.
   review: 0.55
-  # Calibrated on this library (29 papers): `missing-topic` is asked as "is the
-  # approach one that no topic has any place for", which answers on a narrower
-  # scale than the old wording did. Measured: a paper known to be a gap (a
-  # lattice-QCD paper with no lattice topic) scores 0.32, while the highest
-  # non-gap scores 0.16. 0.25 sits between them.
-  missing_topic_review: 0.25
+  # Recalibrated after the question was rewritten (see docs/tag-system-design.md):
+  # asked about "the paper's area of physics, or the framework it is built on",
+  # the three papers known to be gaps score 0.63 / 0.71 / 0.84 while the highest
+  # non-gap of 28 scores 0.33. 0.50 sits in that valley; anything from 0.40 to
+  # 0.55 flags the same three today.
+  missing_topic_review: 0.50
   irrelevant: 0.80
   # `covered` is the sensitive signal: that same paper falls from 0.96 to 0.59
   # without its topic. Measured distribution separates cleanly at 0.45 | 0.79.

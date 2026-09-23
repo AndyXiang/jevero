@@ -68,12 +68,11 @@ _COVERAGE_INSTRUCTIONS = {
         "named, as long as its approach fits inside a listed topic."
     ),
     "missing-topic": (
-        "Is this paper built on a whole approach - an entire method, framework, "
-        "or subfield - that no configured topic has any place for? Answer yes "
-        "when browsing the configured topics would leave this paper's approach "
-        "with nowhere to go. Answer no when the approach fits inside a topic that "
-        "is already listed, even if the paper's particular technique, observable, "
-        "or formalism variant is not named."
+        "Does the configured topic list leave out something central to this "
+        "paper - its area of physics, or the framework it is built on? Answer "
+        "yes when a reader browsing the listed topics would not find where this "
+        "paper belongs, even if one listed topic happens to match its observable. "
+        "Answer no only when the paper's area and its framework are both covered."
     ),
     "irrelevant": "Is this paper outside the intended literature scope?",
 }
@@ -144,9 +143,11 @@ _NOTE = (
     "Coverage is not a topic. Judge it on the paper's subject matter and "
     "on the approach it is built on - not on every detail: a specific "
     "technique or observable that sits inside a listed topic is not a "
-    "gap. 'missing-topic' means the paper is built on a whole approach "
-    "that no topic has a place for, so the taxonomy is incomplete; "
-    "'irrelevant' means the paper is outside the intended scope."
+    "gap. 'missing-topic' means the list leaves out something central - "
+    "the paper's area of physics, or the framework it is built on - so a "
+    "reader browsing the topics would not find where this paper belongs "
+    "and the taxonomy is incomplete; 'irrelevant' means the paper is "
+    "outside the intended scope."
 )
 
 

@@ -269,15 +269,24 @@ def test_api_key_is_required():
         JevClient("", model="typesafe/jev-1.13")
 
 
-def test_coverage_is_judged_on_aspects_not_only_the_subject(config: Config):
-    """A topic list that names the subject but no method is not full coverage."""
+def test_the_gap_question_asks_about_the_area_and_the_framework(config: Config):
+    """The pair has to be symmetric, or a whole missing subfield reads as covered.
+
+    The gap question used to ask only whether the paper was *built on* an approach
+    the list had no place for. A paper whose framework matched a listed topic while
+    its entire area of physics did not was therefore answered "not a gap" --
+    measured at 0.18 for a heavy-ion paper against a 0.25 gate. Asking about the
+    area *or* the framework, and answering "no" only when both are covered,
+    separates real gaps (0.63-0.84) from the rest (<=0.33).
+    """
     questions = build_questions(config)
 
     missing = questions[question_key("coverage", "missing-topic")]["instructions"]
     covered = questions[question_key("coverage", "covered")]["instructions"]
 
-    assert "whole approach" in missing
-    assert "fits inside a topic that is already listed" in missing
+    assert "area of physics" in missing
+    assert "framework" in missing
+    assert "both covered" in missing
     assert "approach" in covered and "subject matter" in covered
     assert "outside the intended literature scope" in questions[
         question_key("coverage", "irrelevant")
