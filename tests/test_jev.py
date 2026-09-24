@@ -343,3 +343,48 @@ def test_fingerprint_covers_everything_that_changes_a_judgement(config: Config):
     assert fingerprint(other_model) != base
     assert fingerprint(other_floor) != base
     assert fingerprint(other_topics) != base
+
+
+def test_the_paper_text_goes_into_the_state(config: Config):
+    from jevero.jev import build_state
+
+    paper = PaperRecord(zotero_key="K", title="T", abstract="A")
+
+    assert "full_text_excerpt" not in build_state(paper, config)
+    state = build_state(paper, config, full_text="I. INTRODUCTION ... NRQCD ...")
+    assert state["full_text_excerpt"] == "I. INTRODUCTION ... NRQCD ..."
+    # The abstract is kept: it is clean metadata, and 5 of 43 papers' indexed text
+    # does not begin with it.
+    assert state["paper"]["abstract"] == "A"
+
+
+def test_the_fingerprint_covers_how_much_text_is_sent(config: Config):
+    """Changing the budget changes the judgements, so it has to invalidate them."""
+    from jevero.jev import fingerprint
+
+    base = fingerprint(config)
+    other = config.model_copy(
+        update={
+            "classification": config.classification.model_copy(
+                update={
+                    "full_text": config.classification.full_text.model_copy(
+                        update={"max_chars": 4000}
+                    )
+                }
+            )
+        }
+    )
+    off = config.model_copy(
+        update={
+            "classification": config.classification.model_copy(
+                update={
+                    "full_text": config.classification.full_text.model_copy(
+                        update={"enabled": False}
+                    )
+                }
+            )
+        }
+    )
+
+    assert fingerprint(other) != base
+    assert fingerprint(off) != base

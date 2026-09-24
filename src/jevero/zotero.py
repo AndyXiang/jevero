@@ -48,6 +48,8 @@ LOCAL_USER_ID = "0"
 #: Only API version 3 exists locally, and only one version at a time.
 ZOTERO_API_VERSION = "3"
 PAGE_SIZE = 100
+#: A paper has a handful of children (its PDF, maybe a note); this only bounds the read.
+CHILD_LIMIT = 25
 #: Asks Zotero for a local write key; shows a confirmation dialog (Zotero 10+).
 AUTHORIZE_PATH = "/local/authorize"
 #: Shown in that dialog, so the user knows who is asking to modify the library.
@@ -398,6 +400,40 @@ class ZoteroClient:
         if item is None:
             raise ZoteroReadError(f"item {key} has no usable data")
         return item
+
+    def full_text(self, item_key: str) -> str:
+        """Zotero's own indexed text for this item's PDF, if it has one.
+
+        Zotero indexes PDF attachments itself, so this needs no PDF parser here:
+        it is a read of the attachment's ``fulltext`` endpoint. A paper without a
+        PDF, or one Zotero has not indexed, yields an empty string, and the caller
+        falls back to the abstract — losing text is never a reason to fail a
+        paper. Every other read error propagates, so a broken or unreachable
+        library is not silently mistaken for "this paper has no text".
+        """
+        try:
+            children = self._get_json(
+                f"{self.library_prefix}/items/{item_key}/children",
+                params={"limit": CHILD_LIMIT},
+            )
+        except ZoteroNotFoundError:
+            return ""
+        if not isinstance(children, list):
+            return ""
+
+        for raw in children:
+            child = _to_item(raw)
+            if child is None or child.data.get("contentType") != "application/pdf":
+                continue
+            try:
+                payload = self._get_json(
+                    f"{self.library_prefix}/items/{child.key}/fulltext"
+                )
+            except ZoteroNotFoundError:
+                continue  # not indexed (yet); another attachment may be
+            if isinstance(payload, dict):
+                return str(payload.get("content") or "")
+        return ""
 
     def ensure_writes_available(self) -> None:
         """Fail fast when the running Zotero cannot accept local writes.

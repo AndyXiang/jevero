@@ -73,6 +73,9 @@ class PaperPlan:
     actions: PolicyActions
     outcome: JevOutcome | None = None
     note: str | None = None
+    #: Characters of the paper's own text that were sent, and how many it has.
+    text_sent: int = 0
+    text_available: int = 0
 
 
 @dataclass
@@ -912,8 +915,9 @@ def _process_one(
         summary.skipped += 1
         return
 
+    full_text, text_available = _paper_text(item, config, zotero=zotero)
     try:
-        outcome = jev.classify(paper, config)
+        outcome = jev.classify(paper, config, full_text=full_text)
     except JevTransportError as exc:
         # Not this paper's fault: stop the run and leave every paper untouched,
         # rather than spraying agent/error over papers that were never judged.
@@ -929,7 +933,17 @@ def _process_one(
     actions = plan(
         outcome.result, config, input_mode=paper.input_mode, fingerprint=stamp
     )
-    _render(PaperPlan(item=item, paper=paper, actions=actions, outcome=outcome), config)
+    _render(
+        PaperPlan(
+            item=item,
+            paper=paper,
+            actions=actions,
+            outcome=outcome,
+            text_sent=len(full_text),
+            text_available=text_available,
+        ),
+        config,
+    )
     if outcome.usage and outcome.usage.cost:
         summary.cost += outcome.usage.cost
 
@@ -995,6 +1009,31 @@ def _apply_review_skip(paper: PaperRecord, *, zotero: ZoteroClient, mutate: bool
             )
 
 
+def _paper_text(
+    item: ZoteroItem, config: Config, *, zotero: ZoteroClient
+) -> tuple[str, int]:
+    """An excerpt of the paper's own text, and how much of it exists.
+
+    The excerpt is where a paper usually says what framework it is built on, which
+    its abstract often leaves out. Reading it can fail for reasons that say nothing
+    about the paper — no PDF, or Zotero has not indexed it — so that yields no
+    text and the judgement falls back to the abstract. A real read error is
+    reported, because a broken library should not look like "no text".
+    """
+    settings = config.classification.full_text
+    if not settings.enabled or settings.max_chars == 0:
+        return "", 0
+    try:
+        text = zotero.full_text(item.key)
+    except ZoteroError as exc:
+        typer.secho(
+            f"[{item.key}] could not read the paper's text: {exc}",
+            fg=typer.colors.YELLOW,
+        )
+        return "", 0
+    return text[: settings.max_chars], len(text)
+
+
 def _is_flagged(actions: PolicyActions) -> bool:
     return any(tag.startswith(REVIEW_PREFIX) for tag in actions.add_tags)
 
@@ -1021,6 +1060,11 @@ def _render(plan_result: PaperPlan, config: Config) -> None:
         typer.echo(f"  {meta}")
     if paper.input_mode is not InputMode.FULL:
         typer.secho("  input: title-only", fg=typer.colors.YELLOW)
+    if plan_result.text_sent:
+        typer.echo(
+            f"  input: abstract + {plan_result.text_sent:,} of "
+            f"{plan_result.text_available:,} characters of the paper's text"
+        )
 
     _render_scores(
         "Topics",

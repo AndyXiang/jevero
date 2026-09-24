@@ -164,6 +164,30 @@ class ZoteroConfig(BaseModel):
     timeout_seconds: float = Field(default=30.0, gt=0)
 
 
+class FullTextConfig(BaseModel):
+    """Whether to send the paper's own text, and how much of it.
+
+    A paper almost always says what framework it is built on in the introduction,
+    and almost never in its abstract. Judging from the abstract alone therefore
+    misses the framework topics: two papers whose text names NRQCD seven and
+    twenty-nine times scored that topic 0.50 and 0.54, and scored it 0.86-0.90
+    once the first few thousand characters were included.
+
+    Zotero indexes PDF attachments itself, so this is one read on an attachment
+    child rather than a PDF parser in this project.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    enabled: bool = True
+    #: Characters of the indexed text to send, from the start. The introduction is
+    #: where a paper states its framework, so the head is the part worth sending.
+    #: Measured on this library: 8k, 10k and 20k characters give the same
+    #: judgements, while 20k costs twice as much per paper and the median paper is
+    #: 53k characters (the longest is 590k, against a 32k-token context).
+    max_chars: int = Field(default=10000, ge=0)
+
+
 class ClassificationConfig(BaseModel):
     """Behaviour that is not a threshold or a taxonomy description."""
 
@@ -174,6 +198,7 @@ class ClassificationConfig(BaseModel):
     #: evidence behind the `irrelevant` coverage judgment, so it belongs in
     #: configuration rather than in a prompt string.
     scope: str = ""
+    full_text: FullTextConfig = FullTextConfig()
 
 
 class CollectionsConfig(BaseModel):

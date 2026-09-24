@@ -129,7 +129,10 @@ _TASK = (
     "give the broader one a low probability instead of letting it ride "
     "along. Only a genuinely cross-cutting paper should clear several "
     "topics at once. A topic applies when the paper's own results "
-    "concern it."
+    "concern it.\n"
+    "When the paper's own text is included, it is the strongest evidence for "
+    "what the paper is built on: abstracts routinely describe the observable "
+    "and leave the framework to the introduction. It may be truncated."
 )
 
 #: Bumped whenever the way a judgement is *stored* changes: which namespaces hold
@@ -151,13 +154,16 @@ _NOTE = (
 )
 
 
-def build_state(paper: PaperRecord, config: Config) -> dict[str, Any]:
+def build_state(
+    paper: PaperRecord, config: Config, *, full_text: str = ""
+) -> dict[str, Any]:
     """Everything the classifier is allowed to see.
 
-    Original metadata plus the taxonomy. No PDF text, no summaries, no
-    instructions about what to write into Zotero.
+    Original metadata, the taxonomy, and — when it is available — an excerpt of
+    the paper's own text, which is where the framework it is built on is usually
+    named. No summaries, and no instructions about what to write into Zotero.
     """
-    return {
+    state = {
         "task": _TASK,
         "paper": {
             "title": paper.title,
@@ -175,6 +181,9 @@ def build_state(paper: PaperRecord, config: Config) -> dict[str, Any]:
         "coverage_states": dict(config.coverage),
         "note": _NOTE,
     }
+    if full_text:
+        state["full_text_excerpt"] = full_text
+    return state
 
 
 def fingerprint(config: Config) -> str:
@@ -195,6 +204,7 @@ def fingerprint(config: Config) -> str:
         "fallback_scope": _INTENDED_SCOPE_FALLBACK,
         "questions": build_questions(config),
         "thresholds": config.thresholds.model_dump(mode="json"),
+        "full_text": config.classification.full_text.model_dump(mode="json"),
     }
     blob = json.dumps(payload, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:8]
@@ -305,9 +315,11 @@ class JevClient:
         if self._owns_client:
             self._http.close()
 
-    def classify(self, paper: PaperRecord, config: Config) -> JevOutcome:
+    def classify(
+        self, paper: PaperRecord, config: Config, *, full_text: str = ""
+    ) -> JevOutcome:
         """Classify one paper in a single Decisions request."""
-        state = build_state(paper, config)
+        state = build_state(paper, config, full_text=full_text)
         questions = build_questions(config)
         payload = self._request(
             state, questions, session_id=f"jevero:{paper.zotero_key}"

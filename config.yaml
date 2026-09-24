@@ -33,6 +33,20 @@ classification:
   # jevero/review/missing-abstract.
   allow_title_only: false
 
+  # A paper says what framework it is built on in its introduction, and usually not
+  # in its abstract, so an abstract-only judgement cannot see framework topics at
+  # all. Two papers whose text names NRQCD scored that topic 0.50 and 0.54 from the
+  # abstract and 0.86-0.92 once the first few thousand characters were added.
+  # Zotero indexes PDF attachments itself, so this reads an indexed attachment --
+  # there is no PDF parsing in this project.
+  full_text:
+    enabled: true
+    # Characters of the indexed text, from the start; the introduction is where a
+    # paper states its framework. Measured on this library: 8k, 10k and 20k give
+    # the same judgements, while the median paper is 53k characters and the longest
+    # 590k, against the model's 32k-token context. So the excerpt has to be bounded.
+    max_chars: 10000
+
   # What belongs in this library at all. This is the evidence behind the
   # `irrelevant` coverage judgment, which is why it lives here rather than in a
   # prompt string in jev.py.

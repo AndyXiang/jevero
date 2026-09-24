@@ -19,13 +19,14 @@ from jevero.zotero import (
     ZoteroCollectionAmbiguousError,
     ZoteroAuthorizationError,
     ZoteroClient,
+    ZoteroError,
     ZoteroItem,
     ZoteroLocalApiDisabledError,
     ZoteroNotFoundError,
     ZoteroReadError,
     ZoteroWriteError,
-    merge_collections,
     extra_values,
+    merge_collections,
     merge_extra,
     merge_tags,
     normalize_item,
@@ -747,3 +748,69 @@ def test_a_stale_stored_key_is_replaced_after_a_401(zotero_item_payload: dict):
     assert api.authorize_calls == 1
     assert seen == ["local-key-1"]
     assert api.patch_headers[1]["Zotero-API-Key"] == "local-key-1"
+
+
+# --------------------------------------------------------------------------- #
+# indexed full text
+# --------------------------------------------------------------------------- #
+
+
+def test_full_text_reads_the_pdf_attachment():
+    children = [
+        {"key": "NOTE0001", "version": 1, "data": {"itemType": "note"}},
+        {"key": "PDF00001", "version": 2,
+         "data": {"itemType": "attachment", "contentType": "application/pdf"}},
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/items/PAPER001/children"):
+            return httpx.Response(200, json=children)
+        assert request.url.path.endswith("/items/PDF00001/fulltext")
+        return httpx.Response(200, json={"content": "the introduction", "indexedPages": 12})
+
+    with make_client(handler) as client:
+        assert client.full_text("PAPER001") == "the introduction"
+
+
+def test_full_text_is_empty_when_there_is_no_pdf():
+    """A paper without an attachment is not an error, just no text."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[
+            {"key": "NOTE0001", "version": 1, "data": {"itemType": "note"}},
+        ])
+
+    with make_client(handler) as client:
+        assert client.full_text("PAPER001") == ""
+
+
+def test_full_text_is_empty_when_zotero_has_not_indexed_it():
+    """A 404 on `fulltext` means "not indexed yet", not "the read failed"."""
+    children = [
+        {"key": "PDF00001", "version": 2,
+         "data": {"itemType": "attachment", "contentType": "application/pdf"}},
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/children"):
+            return httpx.Response(200, json=children)
+        return httpx.Response(404, json={"error": "not found"})
+
+    with make_client(handler) as client:
+        assert client.full_text("PAPER001") == ""
+
+
+def test_full_text_propagates_a_real_read_failure():
+    """A broken library must not look like "this paper has no text"."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/children"):
+            return httpx.Response(200, json=[
+                {"key": "PDF00001", "version": 2,
+                 "data": {"itemType": "attachment", "contentType": "application/pdf"}},
+            ])
+        return httpx.Response(500, text="boom")
+
+    with make_client(handler) as client:
+        with pytest.raises(ZoteroError):
+            client.full_text("PAPER001")

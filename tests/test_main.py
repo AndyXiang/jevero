@@ -87,9 +87,11 @@ class FakeJevClient:
         self._outcome = outcome
         self._error = error
         self.calls = 0
+        self.texts: list[str] = []
 
-    def classify(self, paper, config):
+    def classify(self, paper, config, *, full_text=""):
         self.calls += 1
+        self.texts.append(full_text)
         if self._error is not None:
             raise self._error
         assert self._outcome is not None
@@ -122,6 +124,9 @@ class FakeZotero:
         self._extra = [copy.deepcopy(other) for other in extra_items]
         self._supports_write = supports_write
         self._writes_available = writes_available
+        #: Indexed text per item key, as Zotero would report it.
+        self.full_texts: dict[str, str] = {}
+        self.text_reads: list[str] = []
         self.applied: list[PolicyActions] = []
         self.read_paths: list[str] = []
         self.created: list[str] = []
@@ -185,6 +190,10 @@ class FakeZotero:
             yielded += 1
             if limit is not None and yielded >= limit:
                 return
+
+    def full_text(self, key: str) -> str:
+        self.text_reads.append(key)
+        return self.full_texts.get(key, "")
 
     def get_item(self, key: str) -> ZoteroItem:
         self.read_paths.append(f"item:{key}")
@@ -1066,3 +1075,86 @@ def test_a_paper_judged_before_stamps_still_counts_as_out_of_date(
     assert "Candidates: 1 papers" in result.output
     assert "1 of them were judged with another model" in result.output
     assert jev.calls == 1
+
+
+def test_the_paper_text_reaches_the_classifier(
+    monkeypatch, config_path: Path, confidence: JevOutcome
+):
+    """The framework a paper is built on is usually named only in its text."""
+    zotero = FakeZotero(ITEM)
+    zotero.full_texts["ABCD2345"] = "I. INTRODUCTION We work in NRQCD."
+    jev = FakeJevClient(outcome=confidence)
+    wire(monkeypatch, zotero, jev)
+
+    result = CliRunner().invoke(
+        app, ["process", "--config", str(config_path), "--dry-run"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert jev.texts == ["I. INTRODUCTION We work in NRQCD."]
+    assert zotero.text_reads == ["ABCD2345"]
+    assert "characters of the paper's text" in result.output
+
+
+def test_the_paper_text_is_bounded_by_the_configuration(
+    monkeypatch, config_path: Path, confidence: JevOutcome, tmp_path: Path
+):
+    """The excerpt has to fit the model's context, so it is capped in config."""
+    bounded = tmp_path / "config.yaml"
+    bounded.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            "  allow_title_only: false",
+            "  allow_title_only: false\n  full_text:\n    max_chars: 12",
+        ),
+        encoding="utf-8",
+    )
+    zotero = FakeZotero(ITEM)
+    zotero.full_texts["ABCD2345"] = "0123456789abcdefghij"
+    jev = FakeJevClient(outcome=confidence)
+    wire(monkeypatch, zotero, jev)
+
+    result = CliRunner().invoke(
+        app, ["process", "--config", str(bounded), "--dry-run"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert jev.texts == ["0123456789ab"]
+
+
+def test_a_paper_without_indexed_text_is_still_judged(
+    monkeypatch, config_path: Path, confidence: JevOutcome
+):
+    """Losing the text is not a reason to fail or skip a paper."""
+    zotero = FakeZotero(ITEM)  # no full_texts entry
+    jev = FakeJevClient(outcome=confidence)
+    wire(monkeypatch, zotero, jev)
+
+    result = CliRunner().invoke(
+        app, ["process", "--config", str(config_path), "--dry-run"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert jev.texts == [""]
+    assert "characters of the paper's text" not in result.output
+
+
+def test_the_text_is_not_read_when_it_is_switched_off(
+    monkeypatch, config_path: Path, confidence: JevOutcome, tmp_path: Path
+):
+    off = tmp_path / "config.yaml"
+    off.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            "  allow_title_only: false",
+            "  allow_title_only: false\n  full_text:\n    enabled: false",
+        ),
+        encoding="utf-8",
+    )
+    zotero = FakeZotero(ITEM)
+    jev = FakeJevClient(outcome=confidence)
+    wire(monkeypatch, zotero, jev)
+
+    result = CliRunner().invoke(app, ["process", "--config", str(off), "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert zotero.text_reads == []
+    assert jev.texts == [""]

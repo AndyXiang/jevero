@@ -9,7 +9,7 @@ The MVP flow is:
 ```text
 Zotero Inbox
     ↓
-read title + abstract + basic metadata
+read title, abstract, metadata, and a bounded excerpt of the paper's text
     ↓
 Jev via OpenRouter
     ↓
@@ -76,8 +76,8 @@ Never modify Zotero's SQLite files directly.
 
 The initial version must NOT include:
 
-- PDF full-text parsing,
-- OCR,
+- PDF parsing or OCR in this project (Zotero indexes attachments itself, so the
+  paper's own text is read through the API — see "Which evidence is sent"),
 - DeepSeek or any second LLM,
 - RAG,
 - embeddings,
@@ -361,9 +361,34 @@ The Jev input should use:
 - original title,
 - original abstract,
 - small amounts of basic metadata when useful,
-- the configured taxonomy and descriptions.
+- the configured taxonomy and descriptions,
+- a bounded excerpt of the paper's own text (see "Which evidence is sent").
 
-The MVP should not send full PDF text.
+### Which evidence is sent
+
+A paper states the framework it is built on in its introduction, and usually not in
+its abstract. Judging from the abstract alone therefore cannot see the framework
+topics at all: two papers whose text names NRQCD seven and twenty-nine times scored
+that topic 0.50 and 0.54 from the abstract alone, and 0.86-0.92 once the first few
+thousand characters were added.
+
+So `classification.full_text` sends an excerpt of the paper's **own** text:
+
+- **Source: Zotero's index.** Zotero indexes PDF attachments itself, so this is one
+  read of an attachment's `fulltext` endpoint. There is no PDF parser here and no
+  second model in the loop; the text goes to Jev as it is.
+- **Bounded, head-first.** `max_chars` (default 10000) characters from the start,
+  because the introduction is where a paper says what it is built on. This matters:
+  the median paper in this library is 53k characters, the longest 590k, and the
+  model's context is 32k tokens. Measured: 8k, 10k and 20k characters give the same
+  judgements.
+- **The abstract stays.** It is clean metadata, and for 5 of 43 papers the indexed
+  text does not begin with it.
+- **Losing the text is never a failure.** No PDF, or nothing indexed yet, means the
+  judgement falls back to the abstract. A real read error is reported instead, so a
+  broken library cannot pass for "no text".
+- **The budget is part of the fingerprint**, so changing it re-judges the library
+  instead of leaving tags produced from a different amount of evidence.
 
 The classifier output should contain probabilities only, not prose explanations, unless a short diagnostic explanation is explicitly enabled for debugging.
 
