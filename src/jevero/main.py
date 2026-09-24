@@ -40,6 +40,7 @@ from .policy import (
     EXTRA_FINGERPRINT,
     REASON_MISSING_ABSTRACT,
     REVIEW_PREFIX,
+    REVIEW_REASONS,
     TAG_KIND_PREFIX,
     TAG_TOPIC_PREFIX,
     error_actions,
@@ -85,10 +86,11 @@ class RunSummary:
     skipped: int = 0
     failed: int = 0
     cost: float = 0.0
-    #: How often each topic/kind tag came out of this run, and how many papers
-    #: were judged. Printed at the end: a word that never fires, or one that
-    #: fires on almost every paper, is a vocabulary problem, and it should be
-    #: visible the moment it appears rather than months later.
+    #: Judged papers whose tags did not change. Counted rather than printed: in a
+    #: re-run they are the majority, and "nothing moved" is the signal.
+    unchanged: int = 0
+    #: How often each topic/kind tag came out of this run, and how many papers were
+    #: judged. Only shown with --verbose; `jevero status` reports stored usage.
     applied: Counter[str] = field(default_factory=Counter)
     considered: int = 0
     #: Papers judged because their fingerprint was out of date, so a run that
@@ -122,7 +124,9 @@ def process(
     ),
     limit: int = typer.Option(0, "--limit", help="Stop after N papers (0 = no limit)."),
     include_processed: bool = typer.Option(
-        False, "--include-processed", help="Reconsider papers already tagged agent/processed."
+        False,
+        "--include-processed",
+        help="Re-judge papers that are already up to date, not just stale ones.",
     ),
     collection: str | None = typer.Option(
         None,
@@ -131,6 +135,9 @@ def process(
     ),
     whole_library: bool = typer.Option(
         False, "--all", help="Process every top-level item in the library."
+    ),
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v", help="Print every judgement, not just the tags."
     ),
 ) -> None:
     """Classify papers, by default those in the configured Inbox collection."""
@@ -155,6 +162,7 @@ def process(
             include_processed=include_processed,
             collection=collection,
             whole_library=whole_library,
+            verbose=verbose,
         )
     except ConfigError as exc:
         typer.secho(f"configuration error: {exc}", fg=typer.colors.RED, err=True)
@@ -171,14 +179,9 @@ def process(
             )
         raise typer.Exit(code=2) from exc
 
-    typer.echo("")
-    typer.echo(
-        f"{summary.processed} processed, {summary.flagged} flagged, "
-        f"{summary.skipped} skipped, {summary.failed} failed"
-    )
-    if summary.cost:
-        typer.echo(f"classifier cost: ${summary.cost:.6f}")
-    _render_vocabulary(config, summary)
+    _render_run_summary(config, summary)
+    if verbose:
+        _render_vocabulary(config, summary)
     if summary.unavailable:
         typer.secho(
             f"stopped: the classifier is unreachable ({summary.unavailable}); no "
@@ -249,6 +252,9 @@ def run(
     no_move: bool = typer.Option(
         False, "--no-move", help="Classify but leave the papers in the inbox."
     ),
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v", help="Print every judgement, not just the tags."
+    ),
 ) -> None:
     """Classify the inbox and file each paper where its tags point.
 
@@ -275,6 +281,7 @@ def run(
             include_processed=False,
             collection=None,
             whole_library=False,
+            verbose=verbose,
         )
         route_summary = None
         if mutate and not no_move:
@@ -285,6 +292,7 @@ def run(
                 limit=None,
                 collection=None,
                 whole_library=False,
+                verbose=verbose,
             )
     except ConfigError as exc:
         typer.secho(f"configuration error: {exc}", fg=typer.colors.RED, err=True)
@@ -299,20 +307,11 @@ def run(
             )
         raise typer.Exit(code=2) from exc
 
-    typer.echo("")
-    typer.echo(
-        f"{summary.processed} processed, {summary.flagged} flagged, "
-        f"{summary.skipped} skipped, {summary.failed} failed"
-    )
-    if summary.cost:
-        typer.echo(f"classifier cost: ${summary.cost:.6f}")
-    _render_vocabulary(config, summary)
-    if route_summary is not None:
-        typer.echo(
-            f"Filed: {route_summary.routed} routed, {route_summary.skipped} unchanged"
-        )
-    if mutate:
-        _report_inbox_remainder(config)
+    _render_run_summary(config, summary, route_summary)
+    if verbose:
+        _render_vocabulary(config, summary)
+        if mutate:
+            _report_inbox_remainder(config)
     if summary.unavailable:
         typer.secho(
             f"stopped before filing: the classifier is unreachable "
@@ -388,6 +387,9 @@ def route(
     whole_library: bool = typer.Option(
         False, "--all", help="Route every top-level item in the library."
     ),
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v", help="Print every membership change, not a summary."
+    ),
 ) -> None:
     """File papers into collections based on the tags they already have.
 
@@ -415,6 +417,7 @@ def route(
             limit=limit or None,
             collection=collection,
             whole_library=whole_library,
+            verbose=verbose,
         )
     except ConfigError as exc:
         typer.secho(f"configuration error: {exc}", fg=typer.colors.RED, err=True)
@@ -438,6 +441,140 @@ def route(
         )
     if summary.failed:
         raise typer.Exit(code=1)
+
+
+@app.command()
+def status(
+    config_path: Path = typer.Option(
+        DEFAULT_CONFIG, "--config", "-c", help="Path to config.yaml."
+    ),
+) -> None:
+    """What the library looks like, and which words are earning their keep.
+
+    Reads Zotero only — no classifier request — so it is free and instant. It
+    answers the questions the tag system is judged by: how much of the library is
+    judged, how much is waiting for a human, and which vocabulary words sit on no
+    paper at all or on nearly every one.
+    """
+    try:
+        config = load_config(config_path)
+        load_environment()
+    except ConfigError as exc:
+        typer.secho(f"configuration error: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2) from exc
+
+    try:
+        with _zotero_client(config) as zotero:
+            items = list(zotero.iter_papers(collection_key=None))
+            paths = zotero.collection_paths()
+            try:
+                inbox_key = zotero.find_collection_key(
+                    config.zotero.inbox_collection
+                )
+            except ZoteroError:
+                inbox_key = None
+    except ZoteroError as exc:
+        typer.secho(f"error: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2) from exc
+
+    stamp = fingerprint(config)
+    stale = [
+        item
+        for item in items
+        if _is_stale(item, stamp, legacy_prefixes=config.retired_prefixes)
+    ]
+    judged = [item for item in items if _fingerprint(item) is not None]
+    fresh = [item for item in judged if item not in stale]
+    never = [
+        item
+        for item in items
+        if _fingerprint(item) is None and item not in stale
+    ]
+
+    typer.echo("Library")
+    typer.echo(
+        f"  {len(items)} papers   {len(fresh)} judged up to date   "
+        f"{len(stale)} out of date   {len(never)} never judged"
+    )
+    inbox = (
+        sum(1 for item in items if inbox_key in (item.data.get("collections") or []))
+        if inbox_key
+        else 0
+    )
+    waiting = [
+        item
+        for item in items
+        if any(tag.startswith(REVIEW_PREFIX) for tag in item.tags)
+    ]
+    reasons = Counter(
+        tag[len(REVIEW_PREFIX) :]
+        for item in waiting
+        for tag in item.tags
+        if tag.startswith(REVIEW_PREFIX)
+    )
+    breakdown = (
+        "  (" + ", ".join(f"{name} {n}" for name, n in sorted(reasons.items())) + ")"
+        if reasons
+        else ""
+    )
+    typer.echo(f"  inbox {inbox}   review {len(waiting)}{breakdown}")
+
+    typer.echo("")
+    typer.echo(f"Vocabulary (papers carrying the tag / {len(items)} papers)")
+    usage = [
+        (prefix + name, sum(1 for item in items if prefix + name in item.tags))
+        for prefix, names in ((TAG_TOPIC_PREFIX, config.topics), (TAG_KIND_PREFIX, config.kinds))
+        for name in names
+    ]
+    # Sorted by usage: the words to look at are the ones at either end.
+    for tag, count in sorted(usage, key=lambda entry: (-entry[1], entry[0])):
+        note = ""
+        if count == 0:
+            note = "   <- never applied"
+        elif len(items) and count * 2 >= len(items):
+            note = "   <- on most papers; carries little information"
+        typer.echo(f"  {tag:<28} {count:>3}/{len(items)}{note}")
+
+    attention: list[str] = []
+    retired = vocabularies(config)["retired"]
+    ghosts = {
+        tag: sum(1 for item in items if tag in item.tags)
+        for tag in retired
+        if any(tag in item.tags for item in items)
+    }
+    if ghosts:
+        attention.append(
+            "retired words still on papers: "
+            + ", ".join(f"{tag} ({n})" for tag, n in sorted(ghosts.items()))
+        )
+    foreign = sorted({tag for item in items for tag in foreign_tags(item.tags, config)})
+    if foreign:
+        attention.append("tags outside the vocabulary: " + ", ".join(foreign))
+    topicless = [
+        item
+        for item in items
+        if not any(tag.startswith(TAG_TOPIC_PREFIX) for tag in item.tags)
+    ]
+    if topicless:
+        keys = ", ".join(item.key for item in topicless[:5])
+        more = f", +{len(topicless) - 5} more" if len(topicless) > 5 else ""
+        attention.append(f"papers with no topic: {len(topicless)} ({keys}{more})")
+    empty = sorted(
+        path
+        for path, key in paths.items()
+        if is_managed_path(path, config)
+        and not any(key in (item.data.get("collections") or []) for item in items)
+    )
+    if empty:
+        attention.append("empty managed collections: " + ", ".join(empty))
+
+    typer.echo("")
+    if not attention:
+        typer.secho("Attention: nothing to look at", fg=typer.colors.GREEN)
+        return
+    typer.secho("Attention", fg=typer.colors.YELLOW)
+    for line in attention:
+        typer.secho(f"  {line}", fg=typer.colors.YELLOW)
 
 
 @app.command()
@@ -699,6 +836,7 @@ def _run(
     include_processed: bool,
     collection: str | None,
     whole_library: bool,
+    verbose: bool = False,
 ) -> RunSummary:
     summary = RunSummary()
     with _zotero_client(config) as zotero:
@@ -728,15 +866,17 @@ def _run(
             library_wide_staleness=scope_key == inbox_key,
             legacy_prefixes=config.retired_prefixes,
         )
+        # `--limit` counts papers to process, not items to look at: a paper that
+        # needs no work must not eat one of the slots.
+        if limit is not None:
+            candidates = candidates[:limit]
+        # Counted among the papers actually shown, so `--limit 8` never claims
+        # more out-of-date papers than it listed.
         summary.stale = sum(
             1
             for item in candidates
             if _is_stale(item, stamp, legacy_prefixes=config.retired_prefixes)
         )
-        # `--limit` counts papers to process, not items to look at: a paper that
-        # needs no work must not eat one of the slots.
-        if limit is not None:
-            candidates = candidates[:limit]
         typer.echo(f"Scope: {scope_label} via the Zotero local API")
         typer.echo(f"Candidates: {len(candidates)} papers")
         if summary.stale:
@@ -755,7 +895,7 @@ def _run(
                     for item in candidates
                 ),
             )
-        if mutate:
+        if mutate and zotero_write_key() is None:
             typer.secho(
                 'writes need a one-time Zotero confirmation; choose "Always '
                 'Allow" when Zotero asks (a single-use key would mean one '
@@ -773,6 +913,7 @@ def _run(
                     mutate=mutate,
                     summary=summary,
                     stamp=stamp,
+                    verbose=verbose,
                 )
                 if summary.unavailable is not None:
                     break
@@ -787,6 +928,7 @@ def _route(
     limit: int | None,
     collection: str | None,
     whole_library: bool,
+    verbose: bool = False,
 ) -> RouteSummary:
     """File papers into the collections their tags point at."""
     summary = RouteSummary()
@@ -849,9 +991,10 @@ def _route(
                 summary.skipped += 1
                 continue
 
-            _render_route(
-                item, resolved, remove, zotero=zotero, mutate=mutate
-            )
+            if verbose:
+                _render_route(item, resolved, remove, zotero=zotero, mutate=mutate)
+            else:
+                _render_route_compact(item, resolved, remove, zotero=zotero)
             if mutate:
                 try:
                     zotero.apply_membership(item, add=add, remove=remove)
@@ -902,6 +1045,7 @@ def _process_one(
     mutate: bool,
     summary: RunSummary,
     stamp: str,
+    verbose: bool = False,
 ) -> None:
     try:
         paper = item.to_paper()
@@ -933,17 +1077,18 @@ def _process_one(
     actions = plan(
         outcome.result, config, input_mode=paper.input_mode, fingerprint=stamp
     )
-    _render(
-        PaperPlan(
-            item=item,
-            paper=paper,
-            actions=actions,
-            outcome=outcome,
-            text_sent=len(full_text),
-            text_available=text_available,
-        ),
-        config,
+    plan_result = PaperPlan(
+        item=item,
+        paper=paper,
+        actions=actions,
+        outcome=outcome,
+        text_sent=len(full_text),
+        text_available=text_available,
     )
+    if verbose:
+        _render(plan_result, config)
+    elif not _render_compact(plan_result):
+        summary.unchanged += 1
     if outcome.usage and outcome.usage.cost:
         summary.cost += outcome.usage.cost
 
@@ -1036,6 +1181,120 @@ def _paper_text(
 
 def _is_flagged(actions: PolicyActions) -> bool:
     return any(tag.startswith(REVIEW_PREFIX) for tag in actions.add_tags)
+
+
+def _render_compact(plan_result: PaperPlan) -> bool:
+    """One paper in two lines: what it is, and which tags it gained or lost.
+
+    The judgement behind the tags (every probability, the coverage split, the
+    fingerprint) is what ``--verbose`` prints: on a 43-paper library that is
+    around 1,500 lines of diagnostics wrapped around 40 lines of result.
+
+    Returns False when the tags did not change, so a re-run that moves nothing
+    says so once in the summary instead of listing every paper again.
+    """
+    actions = plan_result.actions
+    current = set(plan_result.item.tags)
+    added = sorted(actions.add_tags - current)
+
+    removed = set(actions.remove_tags) & current
+    prefixes = {prefix for prefix in actions.remove_tag_prefixes if prefix}
+    if prefixes:
+        removed |= {
+            tag for tag in current if any(tag.startswith(p) for p in prefixes)
+        }
+    removed -= actions.add_tags
+    if not added and not removed:
+        return False
+
+    paper = plan_result.paper
+    typer.secho(f"[{paper.zotero_key}] {paper.title}", bold=True)
+    if added:
+        flagged = any(tag.startswith(REVIEW_PREFIX) for tag in added)
+        typer.secho(
+            "    " + " ".join(f"+{tag}" for tag in added),
+            fg=typer.colors.YELLOW if flagged else typer.colors.GREEN,
+        )
+    if removed:
+        typer.secho(
+            "    " + " ".join(f"-{tag}" for tag in sorted(removed)),
+            fg=typer.colors.RED,
+        )
+    return True
+
+
+def _render_run_summary(
+    config: Config, summary: RunSummary, route_summary: RouteSummary | None = None
+) -> None:
+    """The run in a few lines: what happened, what it cost, who is waiting.
+
+    Vocabulary usage and the inbox census are deliberately not here: they describe
+    the library, not this run. ``jevero status`` reports both on demand, and both
+    are available here with ``--verbose``.
+    """
+    typer.echo("")
+    typer.echo(
+        f"{summary.processed} processed, {summary.flagged} flagged, "
+        f"{summary.unchanged} unchanged, {summary.skipped} skipped, "
+        f"{summary.failed} failed"
+    )
+    if route_summary is not None:
+        typer.echo(
+            f"Filed: {route_summary.routed} routed, {route_summary.skipped} unchanged"
+        )
+    if summary.cost:
+        typer.echo(f"classifier cost: ${summary.cost:.6f}")
+
+    waiting = _review_queue(config)
+    if not waiting:
+        typer.secho("Review: nothing waiting for a human", fg=typer.colors.GREEN)
+        return
+    where = (
+        f" → {config.collections.review_collection}"
+        if config.collections.review_collection
+        else ""
+    )
+    typer.secho(
+        f"Review: {waiting} paper{'s' if waiting != 1 else ''} need a human{where}",
+        fg=typer.colors.YELLOW,
+    )
+
+
+def _review_queue(config: Config) -> int:
+    """How many papers in the library carry a review reason (a free read)."""
+    with _zotero_client(config) as zotero:
+        return sum(
+            1
+            for item in zotero.iter_papers(collection_key=None)
+            if any(tag.startswith(REVIEW_PREFIX) for tag in item.tags)
+        )
+
+
+def _render_route_compact(
+    item: ZoteroItem,
+    resolved: dict[str, str | None],
+    remove: set[str],
+    *,
+    zotero: ZoteroClient,
+) -> None:
+    """One line per paper: where it was filed, and what it left.
+
+    Keyed rather than titled: the tag block a few lines above already named the
+    paper, and the mapping from tag to collection is the boring case. What is
+    worth a line is a collection that had to be created, and a membership that was
+    dropped.
+    """
+    if resolved:
+        destinations = ", ".join(
+            f"{path}{'' if key else ' (new)'}" for path, key in resolved.items()
+        )
+        typer.secho(f"[{item.key}] → {destinations}", fg=typer.colors.GREEN)
+    if remove:
+        by_key = {key: path for path, key in zotero.collection_paths().items()}
+        typer.secho(
+            f"[{item.key}] ← " + ", ".join(by_key.get(key, key) for key in sorted(remove)),
+            fg=typer.colors.RED,
+        )
 
 
 def _render(plan_result: PaperPlan, config: Config) -> None:

@@ -256,7 +256,7 @@ def test_dry_run_performs_no_mutations(
     wire(monkeypatch, zotero, FakeJevClient(outcome=confidence))
 
     result = CliRunner().invoke(
-        app, ["process", "--config", str(config_path), "--dry-run"]
+        app, ["process", "--config", str(config_path), "--dry-run", "--verbose"]
     )
 
     assert result.exit_code == 0, result.output
@@ -460,7 +460,7 @@ def test_an_out_of_date_paper_is_re_judged_without_asking(
     wire(monkeypatch, zotero, FakeJevClient(outcome=confidence))
 
     result = CliRunner().invoke(
-        app, ["process", "--config", str(config_path), "--dry-run"]
+        app, ["process", "--config", str(config_path), "--dry-run", "--verbose"]
     )
 
     assert result.exit_code == 0, result.output
@@ -547,7 +547,7 @@ def test_route_dry_run_writes_nothing(monkeypatch, config_path: Path):
     assert result.exit_code == 0, result.output
     assert "02 Topics/quarkonium" in result.output
     assert "04 Review" in result.output
-    assert "does not exist yet" in result.output
+    assert "(new)" in result.output
     assert zotero.created == []
     assert zotero.membership == []
 
@@ -690,7 +690,7 @@ def test_route_prune_dry_run_shows_the_removal_but_writes_nothing(
     )
 
     assert result.exit_code == 0, result.output
-    assert "- 04 Review" in result.output
+    assert "← 04 Review" in result.output
     assert zotero.membership == []
     assert zotero.created == []
 
@@ -892,7 +892,7 @@ def test_run_no_move_classifies_only(monkeypatch, config_path: Path, confidence:
     wire(monkeypatch, zotero, FakeJevClient(outcome=confidence))
 
     result = CliRunner().invoke(
-        app, ["run", "--config", str(config_path), "--no-move"]
+        app, ["run", "--config", str(config_path), "--no-move", "--verbose"]
     )
 
     assert result.exit_code == 0, result.output
@@ -909,7 +909,9 @@ def test_run_reports_papers_that_need_metadata(
     jev = FakeJevClient(outcome=confidence)
     wire(monkeypatch, zotero, jev)
 
-    result = CliRunner().invoke(app, ["run", "--config", str(config_path)])
+    result = CliRunner().invoke(
+        app, ["run", "--config", str(config_path), "--verbose"]
+    )
 
     assert result.exit_code == 0, result.output
     assert jev.calls == 0  # never classified: no abstract
@@ -930,7 +932,7 @@ def test_run_empties_the_inbox_when_configured_to_move(
     wire(monkeypatch, zotero, FakeJevClient(outcome=confidence))
 
     result = CliRunner().invoke(
-        app, ["run", "--config", str(moving_config)]
+        app, ["run", "--config", str(moving_config), "--verbose"]
     )
 
     assert result.exit_code == 0, result.output
@@ -943,7 +945,9 @@ def test_run_does_not_ask_for_confirmation(monkeypatch, config_path: Path, confi
     zotero = FakeZotero(ITEM)
     wire(monkeypatch, zotero, FakeJevClient(outcome=confidence))
 
-    result = CliRunner().invoke(app, ["run", "--config", str(config_path)])
+    result = CliRunner().invoke(
+        app, ["run", "--config", str(config_path), "--verbose"]
+    )
 
     assert result.exit_code == 0, result.output
     assert "WARNING" not in result.output
@@ -963,7 +967,9 @@ def test_run_writes_by_default_and_dry_run_does_not(
 
     zotero = FakeZotero(ITEM)
     wire(monkeypatch, zotero, FakeJevClient(outcome=confidence))
-    result = CliRunner().invoke(app, ["run", "--config", str(config_path)])
+    result = CliRunner().invoke(
+        app, ["run", "--config", str(config_path), "--verbose"]
+    )
     assert len(zotero.applied) == 1
 
 
@@ -984,6 +990,29 @@ def test_limit_counts_papers_to_process_not_items_scanned(
     assert jev.calls == 1
 
 
+def test_stale_count_respects_the_limit(
+    monkeypatch, config_path: Path, confidence: JevOutcome
+):
+    """`--limit 1` must not claim three out-of-date papers it never listed."""
+    items = []
+    for key in ("AAAA0001", "BBBB0002", "CCCC0003"):
+        item = copy.deepcopy(CLASSIFIED_ITEM)
+        item["key"] = key
+        item["data"]["key"] = key
+        items.append(item)
+    zotero = FakeZotero(items[0], extra_items=tuple(items[1:]))
+    wire(monkeypatch, zotero, FakeJevClient(outcome=confidence))
+
+    result = CliRunner().invoke(
+        app, ["process", "--config", str(config_path), "--apply", "--limit", "1"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Candidates: 1 papers" in result.output
+    assert "1 of them were judged with another model" in result.output
+    assert "3 of them" not in result.output
+
+
 def test_run_never_moves_a_paper_it_could_not_file(
     monkeypatch, config_path: Path, tmp_path: Path
 ):
@@ -1002,7 +1031,9 @@ def test_run_never_moves_a_paper_it_could_not_file(
     zotero = FakeZotero(ITEM)
     wire(monkeypatch, zotero, FakeJevClient(error=JevResponseError("no answer")))
 
-    result = CliRunner().invoke(app, ["run", "--config", str(moving_config)])
+    result = CliRunner().invoke(
+        app, ["run", "--config", str(moving_config), "--verbose"]
+    )
 
     assert result.exit_code == 1  # the paper failed, so the run reports it
     assert zotero.applied[0].add_tags == set()
@@ -1087,7 +1118,7 @@ def test_the_paper_text_reaches_the_classifier(
     wire(monkeypatch, zotero, jev)
 
     result = CliRunner().invoke(
-        app, ["process", "--config", str(config_path), "--dry-run"]
+        app, ["process", "--config", str(config_path), "--dry-run", "--verbose"]
     )
 
     assert result.exit_code == 0, result.output
@@ -1114,7 +1145,7 @@ def test_the_paper_text_is_bounded_by_the_configuration(
     wire(monkeypatch, zotero, jev)
 
     result = CliRunner().invoke(
-        app, ["process", "--config", str(bounded), "--dry-run"]
+        app, ["process", "--config", str(bounded), "--dry-run", "--verbose"]
     )
 
     assert result.exit_code == 0, result.output
@@ -1130,7 +1161,7 @@ def test_a_paper_without_indexed_text_is_still_judged(
     wire(monkeypatch, zotero, jev)
 
     result = CliRunner().invoke(
-        app, ["process", "--config", str(config_path), "--dry-run"]
+        app, ["process", "--config", str(config_path), "--dry-run", "--verbose"]
     )
 
     assert result.exit_code == 0, result.output
@@ -1158,3 +1189,111 @@ def test_the_text_is_not_read_when_it_is_switched_off(
     assert result.exit_code == 0, result.output
     assert zotero.text_reads == []
     assert jev.texts == [""]
+
+
+# --------------------------------------------------------------------------- #
+# output: compact by default, everything behind --verbose
+# --------------------------------------------------------------------------- #
+
+
+def test_the_default_output_shows_tags_not_probabilities(
+    monkeypatch, config_path: Path, confidence: JevOutcome
+):
+    """One paper is a title, its tags, and nothing else: the rest is diagnostics."""
+    zotero = FakeZotero(ITEM)
+    wire(monkeypatch, zotero, FakeJevClient(outcome=confidence))
+
+    result = CliRunner().invoke(
+        app, ["process", "--config", str(config_path), "--dry-run"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "[ABCD2345] Energy Correlators in Heavy Quarkonium Production" in result.output
+    assert "+topic/quarkonium" in result.output
+    assert "+kind/core" in result.output
+    # The judgement itself is not printed unless asked for.
+    assert "APPLY" not in result.output
+    assert "0.96" not in result.output
+    assert "Topics" not in result.output
+
+
+def test_verbose_prints_the_whole_judgement(
+    monkeypatch, config_path: Path, confidence: JevOutcome
+):
+    zotero = FakeZotero(ITEM)
+    wire(monkeypatch, zotero, FakeJevClient(outcome=confidence))
+
+    result = CliRunner().invoke(
+        app, ["process", "--config", str(config_path), "--dry-run", "--verbose"]
+    )
+
+    assert result.exit_code == 0, result.output
+    for heading in ("Topics", "Kinds", "Coverage", "Planned tags"):
+        assert heading in result.output
+    assert "APPLY" in result.output
+    assert "Vocabulary usage" in result.output
+
+
+def test_the_summary_reports_the_run_and_who_is_waiting(
+    monkeypatch, config_path: Path, confidence: JevOutcome
+):
+    """Deliberately short: vocabulary and the inbox census belong to `status`."""
+    zotero = FakeZotero(ITEM)
+    wire(monkeypatch, zotero, FakeJevClient(outcome=confidence))
+
+    result = CliRunner().invoke(app, ["run", "--config", str(config_path)])
+
+    assert result.exit_code == 0, result.output
+    assert "1 processed, 0 flagged, 0 unchanged, 0 skipped, 0 failed" in result.output
+    assert "Filed: 1 routed, 0 unchanged" in result.output
+    assert "classifier cost:" in result.output
+    assert "Review: nothing waiting for a human" in result.output
+    assert "Vocabulary usage" not in result.output
+    assert "Inbox now holds" not in result.output
+
+
+def test_the_summary_names_the_papers_that_need_a_human(
+    monkeypatch, config_path: Path, confidence: JevOutcome
+):
+    zotero = FakeZotero(ITEM_WITHOUT_ABSTRACT)
+    wire(monkeypatch, zotero, FakeJevClient(outcome=confidence))
+
+    result = CliRunner().invoke(app, ["run", "--config", str(config_path)])
+
+    assert result.exit_code == 0, result.output
+    assert "Review: 1 paper need a human" in result.output
+
+
+def test_status_reports_the_library_and_the_vocabulary(
+    monkeypatch, config_path: Path
+):
+    """The vocabulary usage view, free: stored tags only, no classifier call."""
+    zotero = FakeZotero(CLASSIFIED_ITEM)
+    zotero._paths = {"02 Topics/quarkonium": "TOPIC111", "04 Review": "REVIEW11"}
+    jev = FakeJevClient()
+    wire(monkeypatch, zotero, jev)
+
+    result = CliRunner().invoke(app, ["status", "--config", str(config_path)])
+
+    assert result.exit_code == 0, result.output
+    assert jev.calls == 0
+    assert "Library" in result.output
+    # This item's stamp is not the current one, so it counts as out of date.
+    assert "1 out of date" in result.output
+    assert "review 1  (ambiguous 1)" in result.output
+    assert "topic/quarkonium" in result.output
+    # A word on no paper is the signal that the vocabulary is not earning its keep.
+    assert "never applied" in result.output
+    assert "02 Topics/quarkonium" in result.output
+
+
+def test_status_counts_an_up_to_date_paper_as_judged(
+    monkeypatch, config_path: Path
+):
+    zotero = FakeZotero(up_to_date_item(config_path))
+    wire(monkeypatch, zotero, FakeJevClient())
+
+    result = CliRunner().invoke(app, ["status", "--config", str(config_path)])
+
+    assert result.exit_code == 0, result.output
+    assert "1 judged up to date   0 out of date" in result.output

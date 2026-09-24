@@ -540,10 +540,44 @@ and `--all` widen the scope; combined with `--apply` they print the scope, the
 number of papers to be written, and block on a `y`/`N` confirmation. A dry-run
 asks nothing, so a wide scope can always be inspected first.
 
-A useful dry-run output is:
+Dry-run must not mutate Zotero.
+
+### Output is the result, not the reasoning
+
+The default output is what changed, one paper per line: its title, the tags it gained
+and lost, and where it was filed. A re-run that moves nothing prints no paper at all,
+because listing 43 identical papers buries the one line that matters.
 
 ```text
 [ABCD1234] Example Paper Title
+    +topic/quarkonium +topic/nrqcd +kind/theory
+[EFGH5678] Another Example Paper
+    +review/ambiguous
+[EFGH5678] → 04 Review (new)
+
+31 processed, 1 flagged, 12 unchanged, 0 skipped, 0 failed
+Filed: 31 routed, 0 unchanged
+classifier cost: $0.008600
+Review: 3 papers need a human → 04 Review
+```
+
+- Tags and collections get a line each rather than sharing one: the tag line is the
+  judgement, the collection line is where it landed, and one crowded line of both is
+  read by nobody. Tag changes are green, removals red, and a `review/*` gain yellow.
+- The summary carries the counts, the cost, and whether anything is waiting for a
+  human. It deliberately omits vocabulary usage and the inbox census: those describe
+  the library, not this run, and `jevero status` reports them on demand.
+- Nothing was changed for a paper whose plan matches its current tags, so "unchanged"
+  is the whole report for it.
+
+`--verbose` / `-v` prints the reasoning behind each line — every probability, the
+coverage split, the engine fingerprint, which evidence was sent and how much of it, and
+the planned `extra` writes:
+
+```text
+[ABCD1234] Example Paper Title
+  A. Author, B. Author et al. · 2024 · arXiv:2401.00001
+  input: abstract + 10,000 of 53,111 characters of the paper's text
 
 Topics
   quarkonium              0.97
@@ -566,7 +600,15 @@ Planned tags
   extra jevero-error removed
 ```
 
-Dry-run must not mutate Zotero.
+### `jevero status`
+
+`status` reads Zotero and calls nothing, so it is free and instant. It answers the
+questions the tag system is judged by: how much of the library is judged and how much
+is out of date, what is waiting for a human and why, which words sit on no paper or on
+nearly every one, and what is wrong (retired words still in use, tags outside the
+vocabulary, papers with no topic, empty managed collections). A word that never gets
+applied and a word that lands on most of the library are both called out, because
+neither carries information.
 
 ---
 
@@ -654,10 +696,10 @@ duplicated `kinds`, or were implied by a more specific topic), so they were dele
 `experiment`); topics should not restate it.
 
 A topic counts as live only if it is applied to something, or is expected to be applied
-as soon as the matching literature arrives. Every run therefore ends with a vocabulary
-usage summary (`applied/total`, with "never applied" and "on most papers" called out),
-so a word that stopped carrying information is visible immediately instead of being
-discovered months later.
+as soon as the matching literature arrives. `jevero status` therefore reports vocabulary
+usage (`applied/total`, with "never applied" and "on most papers" called out), so a word
+that stopped carrying information is visible immediately instead of being discovered
+months later.
 
 Removing a word is a deliberate two-step decision: delete it from the vocabulary, and
 list it under `retired_topics` / `retired_kinds` so the next run removes its tags. A

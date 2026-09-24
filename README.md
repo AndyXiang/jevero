@@ -7,7 +7,7 @@ The project is designed around one narrow workflow:
 ```text
 Zotero Inbox
     ↓
-title + abstract + metadata
+title + abstract + metadata + a bounded excerpt of the paper's own text
     ↓
 Jev
     ↓
@@ -15,10 +15,10 @@ topic / kind / taxonomy-coverage probabilities   (projects deferred)
     ↓
 deterministic Python policy
     ↓
-Zotero tags
+Zotero tags, then collection membership
 ```
 
-The first version intentionally does **not** summarize papers, parse full PDFs, use a second LLM, or act as an autonomous research agent.
+The first version intentionally does **not** summarize papers, parse PDFs itself, use a second LLM, or act as an autonomous research agent. (Zotero indexes attachments itself, so the paper's own text comes from its index — see [Which evidence is sent](#which-evidence-is-sent).)
 
 Its job is classification and routing.
 
@@ -540,6 +540,30 @@ validate structured response
 return ClassificationResult
 ```
 
+#### Which evidence is sent
+
+A paper states the framework it is built on in the introduction, usually not in the
+abstract, so judging from the abstract alone cannot see the framework topics at all:
+two papers whose text names NRQCD seven and twenty-nine times scored that topic 0.50
+and 0.54 from the abstract alone, and 0.86–0.92 once the first few thousand
+characters were added.
+
+So `classification.full_text` sends an excerpt of the paper's **own** text, read
+through Zotero's own index (one read of an attachment's `fulltext` endpoint — there
+is no PDF parser here and no second model in the loop):
+
+- **bounded, head-first** — `max_chars` (default 10000) from the start, because the
+  introduction is where a paper says what it is built on. The median paper in this
+  library is 53k characters and the longest 590k, while the model's context is 32k
+  tokens; measured, 8k, 10k and 20k characters give the same judgements;
+- **the abstract stays** — for 5 of 43 papers the indexed text does not begin with
+  it;
+- **losing the text is never a failure** — no PDF, or nothing indexed yet, falls back
+  to the abstract, while a real read error is reported so a broken library cannot
+  pass for "no text";
+- **the budget is part of the fingerprint**, so changing it re-judges the library
+  instead of leaving tags produced from a different amount of evidence.
+
 ### `policy.py`
 
 Contains deterministic classification policy.
@@ -707,13 +731,56 @@ current one was judged by an older configuration, and the next run re-judges it
 without being asked.
 
 ```bash
-jevero check                      # how many papers are out of date
+jevero status                     # judged / out of date / waiting, and word usage
 jevero process --apply            # inbox + everything stale, then convergence
 jevero route --apply --prune      # collections follow the tags
 ```
 
 `--include-processed` still forces a re-run of papers that are already up to
 date.
+
+### Reading the output
+
+Both `process` and `run` print only what changed — one line per paper for the tags,
+and one for where it was filed:
+
+```text
+[ABCD1234] Example Paper Title
+    +topic/quarkonium +topic/nrqcd +kind/theory
+[EFGH5678] Another Example Paper
+    +review/ambiguous
+[EFGH5678] → 04 Review (new)
+
+31 processed, 1 flagged, 12 unchanged, 0 skipped, 0 failed
+Filed: 31 routed, 0 unchanged
+classifier cost: $0.008600
+Review: 3 papers need a human → 04 Review
+```
+
+A paper whose plan matches the tags it already has prints nothing at all: on a
+re-run that is the whole library, so `--verbose` (`-v`) is there when you want the
+reasoning — every probability, the coverage split, the fingerprint, and how much of
+the paper's text was sent.
+
+`jevero status` answers the library-level questions, and calls nothing, so it is
+free:
+
+```text
+Library
+  43 papers   43 judged up to date   0 out of date   0 never judged
+  inbox 0   review 3  (taxonomy-gap 3)
+
+Vocabulary (papers carrying the tag / 43 papers)
+  topic/quarkonium              28/43   <- on most papers; carries little information
+  kind/experiment                0/43   <- never applied
+  ...
+
+Attention
+  papers with no topic: 1 (CM92MSVI)
+```
+
+Both ends of the usage column are the interesting ones: a word on no paper and a
+word on nearly every paper carry the same amount of information.
 
 ### Wider scopes need a confirmation
 
@@ -826,7 +893,15 @@ Example dry-run:
 
 ```text
 [ABCD1234] Energy Correlators in Heavy Quarkonium Production
+    +topic/energy-correlator +topic/quarkonium +topic/nrqcd +kind/theory
+```
+
+`--verbose` adds the judgement behind those tags:
+
+```text
+[ABCD1234] Energy Correlators in Heavy Quarkonium Production
   Ada Lovelace · 2019
+  input: abstract + 10,000 of 53,111 characters of the paper's text
 
 Topics
   energy-correlator       0.97  APPLY
@@ -836,7 +911,7 @@ Topics
 
 Kinds
   theory                  0.87  APPLY
-  method                  0.61  APPLY
+  method                  0.61
 
 Coverage
   covered                 0.96  >= 0.70
@@ -847,19 +922,18 @@ Planned tags
   + topic/quarkonium
   + topic/nrqcd
   + kind/theory
-  + kind/method
   extra jevero-fingerprint = 9f3c1a77
   extra jevero-error removed
 ```
 
-The run then ends with a vocabulary usage summary, which is what makes a word
+`jevero status` carries the vocabulary usage summary, which is what makes a word
 that never fires (or one that fires on almost every paper) visible immediately:
 
 ```text
-Vocabulary usage (of 29 papers judged this run)
-  topic/heavy-flavor              0/29   <- never applied
-  topic/energy-correlator        11/29
-  kind/theory                    16/29   <- on most papers; carries little information
+Vocabulary (papers carrying the tag / 43 papers)
+  topic/heavy-flavor              0/43   <- never applied
+  topic/energy-correlator        11/43
+  kind/theory                    16/43   <- on most papers; carries little information
 ```
 
 Use dry-run on a representative validation set before enabling automatic writes.

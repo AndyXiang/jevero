@@ -414,3 +414,30 @@ Jev 上下文 32k token → 中位论文约 1.8 万 token，最长约 20 万 tok
 **残余风险**：如果某篇论文的框架只在导言之后才说，head 会切掉它。现有探针里没有这种情况
 （8k 与 50k 结果相同），且补救是"把 `max_chars` 调大"或"head + tail"，都是可测量的参数，
 不需要引入会悄悄失效的解析器。
+
+## 11. 输出就是结果，不是推理（2026-09，**已实现**）
+
+**问题**：默认输出把一次判定的全部诊断都打出来。43 篇的库上是**约 1,500 行概率+覆盖率**包着 40 行
+结论，用户要的"这次改了什么"必须从概率墙里自己找；而且"重跑一遍没有变化"也要把 43 篇原样再列一遍。
+
+**决定**（用户逐条确认过）：
+
+| 决定 | 理由 |
+| --- | --- |
+| 默认只打**变化**：`[KEY] 标题` + 一行 `+tag -tag`；标签涨绿、掉红、拿到 `review/*` 变黄 | 唯一需要读的是变化本身 |
+| 标签与 collection **各占一行**（不为省行合并） | 标签是判定，collection 是落点；挤成一行两个都读不清 |
+| 计划与现状一致的论文**一行都不打**，只进 summary 的 `unchanged` | 收敛后的重跑应该是安静的 |
+| `-v/--verbose` 保留原来的完整块（每个概率、coverage、指纹、送了多少正文、extra 写入） | 诊断仍然拿得到，只是不再默认糊在脸上 |
+| summary 去掉**词表用量**与 **inbox 余量**，加一行 `Review: N papers need a human → 04 Review` | 前两者描述的是**库**，不是**这一次运行**；一次运行真正该回答的是"还有没有人要看的" |
+| 库级信息搬到新的 `jevero status`（只读、免费） | 已判/过期/未判、review 原因分布、每个词 `applied/total`（标出 `<- never applied`、`<- on most papers`）、以及 Attention（retired 词还在、词表外的标签、无 topic 的论文、空的受管 collection） |
+
+**实测**：`status` 当场指出 `topic/quarkonium 28/43`、`topic/nrqcd 25/43` 是基率词，
+`kind/experiment`、`kind/reference` 是 0/43——两端都没有信息量，这正是 §4 "一个词只有在被用上或
+明确期待时才活着"要盯的东西。
+
+**同时修掉的两个小问题**：
+
+- `--limit N` 先在全量候选上数 stale 再截断，`--limit 8` 会报 "43 of them were judged with another
+  model"；现在只数真正列出来的那几篇（有回归测试）。
+- 写授权提示只在**确实没有存 key** 时打（`zotero_write_key() is None`），否则每次 apply 都念一遍；
+  `--include-processed` 的帮助文本不再提已退役的 `agent/processed` 标签。
